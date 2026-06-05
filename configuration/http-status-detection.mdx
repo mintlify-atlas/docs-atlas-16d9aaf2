@@ -1,0 +1,174 @@
+---
+title: "Configure HTTP Status Code Detection"
+sidebarTitle: "HTTP Status Detection"
+description: "Enable per-IP HTTP error anomaly detection and distributed path scanning to block IPs showing 400, 404, 403, or 500 abuse patterns."
+---
+
+HTTP status detection extends WAF rule blocking with a second, complementary layer of analysis. Rather than reacting to specific Cloudflare rule matches, it analyzes raw HTTP error patterns per source IP across the same polling window. This catches probing and scanning activity that Cloudflare's WAF may not have a rule for — such as high-volume 404 path enumeration or 400-series abuse floods. Two sub-modes are available: per-IP code detection and distributed path detection. Both are disabled by default and can be enabled independently.
+
+## Enabling HTTP Status Detection
+
+Set `HttpStatusDetection.Enabled` to `true` to activate the feature. The `WindowSeconds` setting controls how far back each analysis looks, and should remain aligned with `Polling.WindowSeconds` (both default to `300`):
+
+```json
+{
+  "HttpStatusDetection": {
+    "Enabled": true,
+    "WindowSeconds": 300,
+    "Codes": [],
+    "DistributedPathDetection": {
+      "Enabled": false
+    }
+  }
+}
+```
+
+<Tip>
+  Keep `HttpStatusDetection.WindowSeconds` aligned with `Polling.WindowSeconds` (both default to 300) unless you have a specific reason to diverge. Mismatched windows can cause the same events to be counted inconsistently across detection modes.
+</Tip>
+
+## Per-IP Code Detection
+
+Per-IP code detection evaluates each source IP individually against a set of configured status codes. For a block to be triggered, an IP must satisfy **all three thresholds** simultaneously for a given configured status code within the analysis window.
+
+The three thresholds are:
+
+- **`MinTotalErrors`** — The IP must have generated at least this many total HTTP error hits across all configured status codes combined. This guards against blocking IPs on the basis of a single stray error.
+- **`MinDistinctPaths`** — The IP must have touched at least this many distinct request paths. A high distinct-path count is a reliable signal of automated scanning rather than a user encountering a broken link.
+- **`MinCodeRatio`** — The ratio of hits for the specific status code to the IP's total hits across all configured codes must meet or exceed this value. Formula: `code_ratio = count_for_status_code / total_count_across_all_configured_status_codes`. This keeps scoring focused on abusive error patterns without depending on global request volume.
+
+Configure each status code to watch under `HttpStatusDetection.Codes`:
+
+<ParamField path="HttpStatusDetection.Codes[].StatusCode" type="integer" required>
+  The HTTP status code this rule applies to (e.g. `404`, `400`, `403`, `500`).
+</ParamField>
+
+<ParamField path="HttpStatusDetection.Codes[].Enabled" type="boolean" default="true">
+  When `false`, this code entry is retained in configuration but skipped during evaluation. Use this to disable a code rule without removing it.
+</ParamField>
+
+<ParamField path="HttpStatusDetection.Codes[].MinTotalErrors" type="integer" default="20">
+  Minimum total error hits the IP must have across all configured status codes within the window before this code rule is evaluated. Acts as a noise gate.
+</ParamField>
+
+<ParamField path="HttpStatusDetection.Codes[].MinDistinctPaths" type="integer" default="10">
+  Minimum number of distinct URL paths the IP must have requested. Differentiates scanners (many paths) from users hitting a single broken link repeatedly.
+</ParamField>
+
+<ParamField path="HttpStatusDetection.Codes[].MinCodeRatio" type="number" default="0.7">
+  Minimum ratio of this code's hits to total hits across all configured codes. A value of `0.7` means at least 70% of the IP's configured-code errors must be of this specific status code.
+</ParamField>
+
+<ParamField path="HttpStatusDetection.Codes[].TtlMinutes" type="integer" default="240">
+  How long, in minutes, the IP remains blocked when this code rule triggers. Common values: `240` (4h), `120` (2h), `1440` (24h).
+</ParamField>
+
+<ParamField path="HttpStatusDetection.Codes[].Name" type="string" required>
+  A label used in log messages and as the comment on the Cloudflare IP list entry. Use something descriptive like `http_404_scan` or `http_400_abuse`.
+</ParamField>
+
+## Distributed Path Detection
+
+Distributed path detection takes a different angle: instead of evaluating one IP in isolation, it groups HTTP error signals by **request path** across all source IPs, then identifies IPs participating in coordinated scanning across those suspicious paths.
+
+The logic works in two steps:
+
+1. A path is marked **suspicious** when its total error count and number of distinct IPs exceeds the configured path-level thresholds.
+2. An IP is blocked when it has accumulated enough hits across the flagged suspicious paths.
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.Enabled" type="boolean" default="false">
+  Set to `true` to activate distributed path detection. Can be enabled independently of per-IP code detection.
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.StatusCodes" type="integer[]">
+  The HTTP status codes to include when grouping signals by path. Accepts multiple codes, e.g. `[404, 400, 500, 403]`. If this list is empty, the service falls back to the legacy single `StatusCode` field for backwards compatibility.
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.MinPathTotalErrors" type="integer" default="20">
+  Minimum total error hits a path must accumulate across all IPs to be considered suspicious. Raise this value on high-traffic zones to reduce noise.
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.MinDistinctIpsPerPath" type="integer" default="5">
+  Minimum number of distinct source IPs that must have hit a path for it to be flagged as suspicious. A high value indicates coordinated scanning rather than a single noisy client.
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.MinIpHitsOnSuspiciousPaths" type="integer" default="2">
+  Minimum number of hits an IP must have on suspicious paths before it is blocked. Prevents blocking IPs that incidentally touched one suspicious path a single time.
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.MinDistinctSuspiciousPathsPerIp" type="integer" default="1">
+  Minimum number of distinct suspicious paths an IP must have accessed. A value of `1` means one suspicious path is enough; raise this to require broader involvement.
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.TtlMinutes" type="integer" default="120">
+  Block duration in minutes for IPs identified by distributed path detection.
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.Name" type="string" default="http_404_distributed_scan">
+  Label used in log messages and Cloudflare IP list entry comments.
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.ExcludedPaths" type="string[]">
+  Paths to exclude from distributed path analysis. Supports a `*` wildcard suffix (e.g. `/static/*`). Common entries are `/` and `/favicon.ico` — high-volume paths that generate legitimate errors and would otherwise inflate counts. Excluded paths still appear in raw analytics; they are only skipped during suspicious-path evaluation.
+</ParamField>
+
+## Loopback Exclusion
+
+The service unconditionally excludes loopback addresses from all blocking decisions: `localhost`, `127.0.0.1`, and `::1` are never written to the Cloudflare IP list. These addresses may still appear in log output when they are observed in analytics data, but they will never trigger a block action regardless of how thresholds are configured.
+
+## Full Configuration Example
+
+A complete `HttpStatusDetection` block with both per-IP code detection and distributed path detection enabled:
+
+```json
+{
+  "HttpStatusDetection": {
+    "Enabled": true,
+    "WindowSeconds": 300,
+    "DistributedPathDetection": {
+      "Enabled": true,
+      "StatusCodes": [404, 400, 500, 403],
+      "MinPathTotalErrors": 12,
+      "MinDistinctIpsPerPath": 3,
+      "MinIpHitsOnSuspiciousPaths": 2,
+      "MinDistinctSuspiciousPathsPerIp": 1,
+      "TtlMinutes": 120,
+      "Name": "http_status_distributed_scan",
+      "ExcludedPaths": ["/", "/favicon.ico"]
+    },
+    "Codes": [
+      {
+        "StatusCode": 404,
+        "Enabled": true,
+        "MinTotalErrors": 20,
+        "MinDistinctPaths": 8,
+        "MinCodeRatio": 0.7,
+        "TtlMinutes": 240,
+        "Name": "http_404_scan"
+      },
+      {
+        "StatusCode": 400,
+        "Enabled": true,
+        "MinTotalErrors": 15,
+        "MinDistinctPaths": 6,
+        "MinCodeRatio": 0.6,
+        "TtlMinutes": 120,
+        "Name": "http_400_abuse"
+      },
+      {
+        "StatusCode": 500,
+        "Enabled": false,
+        "MinTotalErrors": 25,
+        "MinDistinctPaths": 5,
+        "MinCodeRatio": 0.6,
+        "TtlMinutes": 60,
+        "Name": "http_500_error_flood"
+      }
+    ]
+  }
+}
+```
+
+<Warning>
+  Very low thresholds increase false positive rates. Start conservatively and tune down once you observe real traffic patterns. A `MinTotalErrors` of 5 or a `MinCodeRatio` of 0.3 is likely to catch legitimate users, especially on zones with low organic traffic.
+</Warning>

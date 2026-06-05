@@ -1,0 +1,139 @@
+---
+title: "Deploy WAF Auto-Block with Docker"
+sidebarTitle: "Docker"
+description: "Run WAF Auto-Block using the published Docker Hub image with docker run, including environment file configuration and persistent volume mounting."
+---
+
+WAF Auto-Block ships as a Docker image on Docker Hub (`proteo5/waf-autoblock`). The container exposes port 8080 and reads all configuration from environment variables, making it straightforward to deploy on any Linux server with Docker installed.
+
+## Published Tags
+
+The following image tags are currently available on Docker Hub:
+
+- `proteo5/waf-autoblock:latest`
+- `proteo5/waf-autoblock:v0.1.0-rc1`
+
+<Note>
+  Always validate a versioned tag first. Switch to `latest` only after that validation passes.
+</Note>
+
+## Server Folder Layout
+
+Use a dedicated working folder on the server to keep the env file, Compose file, and SQLite data in one place:
+
+```text
+/opt/waf-autoblock/
+  waf-autoblock.env
+  docker-compose.hub.yml
+  data/
+```
+
+All paths below assume this layout. Adjust to suit your environment if needed.
+
+## Initial Install
+
+<Steps>
+  <Step title="Create the working folder">
+    Create the working folder and the persistent data directory in a single command:
+
+    ```bash
+    mkdir -p /opt/waf-autoblock/data
+    ```
+  </Step>
+
+  <Step title="Create the environment file">
+    Copy the `.env.example` template from the repository to the server and rename it `waf-autoblock.env`. Fill in your Cloudflare credentials, account and zone identifiers, blocklist ID, and the rule IDs you want to monitor:
+
+    ```bash
+    cp .env.example /opt/waf-autoblock/waf-autoblock.env
+    ```
+
+    Open the file and set at minimum:
+
+    ```bash
+    Cloudflare__ApiToken=<your-api-token>
+    Cloudflare__ZoneTag=<your-zone-tag>
+    Cloudflare__AccountId=<your-account-id>
+    Cloudflare__BlocklistId=$$auto_blocked_ips
+    Rules__0__RuleId=<cloudflare-rule-id>
+    Rules__0__Enabled=true
+    ```
+  </Step>
+
+  <Step title="Pull and run the image">
+    Pull the versioned image and start the container with a persistent data volume and the env file:
+
+    ```bash
+    docker pull proteo5/waf-autoblock:v0.1.0-rc1
+    docker run -d \
+      --name waf-autoblock \
+      --restart unless-stopped \
+      -p 8080:8080 \
+      --env-file /opt/waf-autoblock/waf-autoblock.env \
+      -v /opt/waf-autoblock/data:/app/data \
+      proteo5/waf-autoblock:v0.1.0-rc1
+    ```
+  </Step>
+
+  <Step title="Verify the container is running">
+    Query the status endpoint to confirm the service started correctly. A healthy container returns a JSON response with `"running": true`:
+
+    ```bash
+    curl http://localhost:8080/status
+    ```
+  </Step>
+</Steps>
+
+## Container Details
+
+Understanding the container's defaults helps when integrating it into an existing environment.
+
+<CardGroup cols={2}>
+  <Card title="Exposed Port" icon="plug">
+    The container listens on port **8080**. Map it to any host port with `-p <host-port>:8080`.
+  </Card>
+  <Card title="Data Volume" icon="database">
+    Mount a host path to `/app/data` so the SQLite database persists across container replacements. Without this mount, block records are lost on restart.
+  </Card>
+  <Card title="ASPNETCORE_URLS" icon="globe">
+    The image already sets `ASPNETCORE_URLS=http://+:8080`. Do not override this unless you change the exposed port accordingly.
+  </Card>
+  <Card title="Restart Policy" icon="rotate">
+    Use `--restart unless-stopped` in production so the container recovers automatically after host reboots or unexpected exits.
+  </Card>
+</CardGroup>
+
+## Build a Local Image
+
+During development you can build the image directly from the repository root instead of pulling from Docker Hub.
+
+Build the image with a local tag:
+
+```bash
+docker build -t proteo5/waf-autoblock:local .
+```
+
+Run the locally built image, mounting the current directory's `data` folder and supplying an env file:
+
+```bash
+docker run --rm \
+  -p 8080:8080 \
+  --env-file waf-autoblock.env \
+  -v ${PWD}/data:/app/data \
+  proteo5/waf-autoblock:local
+```
+
+The `--rm` flag removes the container automatically when it stops, which is useful for short-lived test runs. Remove it for persistent development sessions.
+
+## Production Checklist
+
+Before deploying to a production server, confirm each of the following:
+
+1. Docker is installed on the target server.
+2. A dedicated working folder has been created (for example `/opt/waf-autoblock/`).
+3. The `waf-autoblock.env` file has been prepared from `.env.example` with real values.
+4. The Cloudflare API token is scoped only to `Zone > Analytics > Read` and `Account > Account Filter Lists > Edit`. Do not use a Global API Key.
+5. The account-level IP list referenced by `Cloudflare__BlocklistId` already exists in the Cloudflare dashboard.
+6. The WAF custom rule that blocks `ip.src in list` is already active and positioned before the lower-priority rules you want to react to.
+7. The `data/` directory has been created at the host path used for the volume mount.
+8. A versioned image tag has been pulled and validated via `/status` before switching to `latest`.

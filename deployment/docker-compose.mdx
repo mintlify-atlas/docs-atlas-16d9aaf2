@@ -1,0 +1,131 @@
+---
+title: "Deploy WAF Auto-Block with Docker Compose"
+sidebarTitle: "Docker Compose"
+description: "Use Docker Compose to manage WAF Auto-Block deployments with easy upgrades, rollbacks, and environment file configuration."
+---
+
+Docker Compose is the recommended deployment method for servers. It keeps the container configuration declarative, makes upgrades and rollbacks a single command, and handles the volume mount and restart policy automatically. The repository ships two Compose files: `docker-compose.yml` for building from source and `docker-compose.hub.yml` for pulling the published Docker Hub image.
+
+## Compose Files
+
+The repository provides two Compose files serving different purposes:
+
+<CardGroup cols={2}>
+  <Card title="docker-compose.yml" icon="hammer">
+    Builds the image locally from the repository source using the `Dockerfile`. The default image tag is `local`. Use this file during development when you need to test uncommitted changes.
+  </Card>
+  <Card title="docker-compose.hub.yml" icon="cloud">
+    Pulls the image from Docker Hub (`proteo5/waf-autoblock`). Defaults to the `latest` tag but respects the `DOCKER_TAG` environment variable to pin a specific version. Use this file for all server deployments.
+  </Card>
+</CardGroup>
+
+Both files load environment variables from `waf-autoblock.env` by default and mount `./data` into the container at `/app/data` for SQLite persistence.
+
+## Server Install with Compose
+
+<Steps>
+  <Step title="Create the server folder and data directory">
+    Set up the working directory that will hold the Compose file, env file, and persistent data:
+
+    ```bash
+    mkdir -p /opt/waf-autoblock/data
+    ```
+  </Step>
+
+  <Step title="Copy the Compose file to the server">
+    Place `docker-compose.hub.yml` in the working directory. This is the only Compose file needed for server deployments:
+
+    ```bash
+    cp docker-compose.hub.yml /opt/waf-autoblock/
+    ```
+  </Step>
+
+  <Step title="Create the environment file">
+    Copy `.env.example` from the repository and fill in your Cloudflare credentials, rule IDs, and any tuning values:
+
+    ```bash
+    cp .env.example /opt/waf-autoblock/waf-autoblock.env
+    ```
+
+    Open `waf-autoblock.env` and set your real values for `Cloudflare__ApiToken`, `Cloudflare__ZoneTag`, `Cloudflare__AccountId`, `Cloudflare__BlocklistId`, and at least one `Rules__0__RuleId`.
+  </Step>
+
+  <Step title="Pull the image and start the service">
+    Pin the versioned tag, pull the image, and bring the service up in detached mode:
+
+    ```bash
+    cd /opt/waf-autoblock
+    export DOCKER_TAG=v0.1.0-rc1
+    docker compose -f docker-compose.hub.yml pull
+    docker compose -f docker-compose.hub.yml up -d
+    ```
+  </Step>
+
+  <Step title="Verify the deployment">
+    Tail the container logs and query the status endpoint to confirm a healthy start:
+
+    ```bash
+    docker compose -f docker-compose.hub.yml logs --tail 100
+    curl http://localhost:8080/status
+    ```
+
+    A successful start shows SQLite initialization, polling startup, and no exception traces in the logs. The status endpoint returns JSON with `"running": true`.
+  </Step>
+</Steps>
+
+## Local Development Build
+
+For local development, run from the repository root. Compose will build the image from source before starting the container:
+
+```bash
+docker compose up --build
+```
+
+The service listens on `http://localhost:8080`. The `./data` directory is mounted automatically so the SQLite database persists between runs. Stop the service with `Ctrl+C`; the data directory remains intact.
+
+## Pinning a Tag
+
+The `DOCKER_TAG` environment variable controls which image version Compose pulls and runs. Set it before calling `docker compose` to pin a specific release:
+
+```bash
+export DOCKER_TAG=v0.1.0-rc1
+docker compose -f docker-compose.hub.yml pull
+docker compose -f docker-compose.hub.yml up -d
+```
+
+To use the `latest` tag instead, unset the variable before running Compose:
+
+```bash
+unset DOCKER_TAG
+docker compose -f docker-compose.hub.yml pull
+docker compose -f docker-compose.hub.yml up -d
+```
+
+<Info>
+  The recommended promotion flow is to validate a versioned tag first, then unset `DOCKER_TAG` and promote to `latest` only after that validation passes.
+</Info>
+
+## Custom Env Filename
+
+By default, both Compose files load environment variables from `waf-autoblock.env` in the working directory. If you need to use a different filename — for example when managing multiple environments on the same server — set `RUNTIME_ENV_FILE` before running Compose:
+
+```bash
+export RUNTIME_ENV_FILE=/opt/waf-autoblock/production.env
+docker compose -f docker-compose.hub.yml up -d
+```
+
+The `RUNTIME_ENV_FILE` variable maps directly to the `env_file.path` field in the Compose definition, so any valid path accepted by Docker Compose is supported.
+
+## Dollar Sign Escaping
+
+<Warning>
+  In Docker Compose env files, the `$` character must be escaped as `$$`. So `$auto_blocked_ips` in config becomes `$$auto_blocked_ips` in the `.env` file. The service receives the literal value `$auto_blocked_ips` and resolves it to the list UUID.
+</Warning>
+
+This matters for `Cloudflare__BlocklistId` when you reference the list by its symbolic name. The `.env.example` file already has the correct escaped form:
+
+```bash
+Cloudflare__BlocklistId=$$auto_blocked_ips
+```
+
+Do not remove the double `$$` — a single `$` would be interpreted as a Compose variable substitution and the value passed to the container would be empty.

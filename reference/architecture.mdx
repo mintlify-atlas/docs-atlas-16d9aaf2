@@ -1,0 +1,109 @@
+---
+title: "WAF Auto-Block Architecture Overview"
+sidebarTitle: "Architecture"
+description: "WAF Auto-Block is a minimal ASP.NET Core service with a single background worker, Cloudflare API clients, SQLite state store, and a status HTTP endpoint."
+---
+
+WAF Auto-Block is intentionally small. The entire runtime is a single .NET 10 process: an ASP.NET Core minimal host that exposes two HTTP endpoints and runs one background worker. There is no UI, no queue, and no external state dependency beyond Cloudflare and a local SQLite file. Every component has a single, well-scoped responsibility, and the interaction between them follows a straight line from poll to block to cleanup.
+
+## Component Map
+
+Each service is registered as a singleton in the DI container. The table below lists each component, the interface it implements, and what it is responsible for.
+
+| Component | Interface | Responsibility |
+|---|---|---|
+| `Worker` | `BackgroundService` | Main polling loop; coordinates detection, blocking, and cleanup on every cycle. |
+| `CloudflareAnalyticsClient` | `ICloudflareAnalyticsClient` | Queries the Cloudflare GraphQL API for firewall events (`firewallEventsAdaptiveGroups`) and HTTP response-code signals (`httpRequestsAdaptiveGroups`). |
+| `CloudflareBlocklistClient` | `ICloudflareBlocklistClient` | Adds and removes IPs from the Cloudflare account-level IP list via the Rules Lists REST API. Supports symbolic list name resolution. |
+| `RuleMatcher` | `IRuleMatcher` | Resolves a firewall event's `ruleId` against the configured rules dictionary. Only explicitly configured and enabled rules produce a match; all others are silently skipped. |
+| `BlockingExpirationCalculator` | `IBlockingExpirationCalculator` | Computes the block expiry timestamp as `blockedAt + TtlMinutes`. The effective minimum TTL is 1 minute. |
+| `SqliteBlockedIpStore` | `IBlockedIpStore` | Persists `BlockedIpRecord` entries to SQLite; provides duplicate-check, TTL-expiry queries, and delete operations. |
+| `AppRuntimeState` | _(singleton, no interface)_ | In-memory state bag that tracks `StartedAt`, `LastSuccessfulPollAt`, and `LastCleanupAt` for the `/status` endpoint. |
+
+<Note>
+  All services are registered as singletons. The background worker is registered via `AddHostedService<Worker>()`.
+</Note>
+
+## External Integrations
+
+The service communicates with two distinct Cloudflare API surfaces.
+
+<CardGroup cols={2}>
+  <Card title="GraphQL Analytics API" icon="chart-bar">
+    **Endpoint:** `https://api.cloudflare.com/client/v4/graphql`
+
+    Used to query two dataset fields:
+    - `firewallEventsAdaptiveGroups` — WAF block events grouped by source IP and rule ID.
+    - `httpRequestsAdaptiveGroups` — HTTP request aggregates grouped by source IP, request path, and response status code.
+
+    Authentication uses a `Bearer` token set on the `HttpClient` default request headers.
+  </Card>
+  <Card title="Rules Lists REST API" icon="shield">
+    **Endpoint:** `https://api.cloudflare.com/client/v4/accounts/{accountId}/rules/lists/{listId}/items`
+
+    Used to add and remove IPs from an account-level IP list. Supports two forms of list identification:
+    - A direct UUID passed in `BlocklistId`.
+    - A symbolic name prefixed with `$` (e.g. `$auto_blocked_ips`), which is resolved to a UUID via a one-time `GET accounts/{accountId}/rules/lists` call.
+  </Card>
+</CardGroup>
+
+## Data Flow
+
+The following steps describe the complete path from a Cloudflare event to a local block record and its eventual removal.
+
+1. The `Worker` wakes on its configured `IntervalSeconds` schedule (plus a small random jitter up to 750 ms) and begins a cycle.
+2. `CloudflareAnalyticsClient.GetOffendingTrafficAsync()` queries `firewallEventsAdaptiveGroups` for events with `action = "block"` in the last `WindowSeconds`. It returns a list of `OffendingTrafficRecord` objects, each carrying a `ClientIp`, `RuleId`, and `Count`.
+3. `CloudflareAnalyticsClient.GetHttpStatusSignalsAsync()` queries `httpRequestsAdaptiveGroups` for the configured status codes in the same window. It returns a list of `HttpStatusSignalRecord` objects, each carrying a `ClientIp`, `RequestPath`, `StatusCode`, and `Count`.
+4. For each WAF event, `RuleMatcher.TryResolve()` maps the `RuleId` to a configured `RuleMonitorOptions`. Unrecognised rule IDs are skipped.
+5. HTTP signal aggregates are scored per IP against `HttpStatusCodeRuleOptions` thresholds (total errors, distinct paths, and per-code ratio) and against the distributed path detection thresholds.
+6. IPs that pass their respective thresholds and are not already in the local store are added via `CloudflareBlocklistClient.AddIpAsync()`. A `BlockedIpRecord` is then saved via `SqliteBlockedIpStore.SaveAsync()`.
+7. On each cycle, `SqliteBlockedIpStore.GetExpiredAsync(DateTimeOffset.UtcNow)` returns all records whose `ExpiresAt` has passed. Each expired entry is removed from Cloudflare via `CloudflareBlocklistClient.RemoveIpAsync()` and deleted from SQLite via `SqliteBlockedIpStore.DeleteAsync()`.
+
+## SQLite Schema
+
+The store uses a single table. The schema is created on startup by `SqliteBlockedIpStore.InitializeAsync()` if it does not already exist.
+
+```sql
+CREATE TABLE IF NOT EXISTS blocked_ips (
+    ip TEXT PRIMARY KEY,
+    cf_item_id TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    blocked_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    hit_count INTEGER NOT NULL
+);
+```
+
+All timestamp columns store ISO 8601 strings (`DateTimeOffset.ToString("O")`). The `cf_item_id` column holds the Cloudflare list item UUID; it may be empty for entries created from asynchronous Cloudflare API responses and is resolved lazily during the cleanup pass.
+
+## HTTP Endpoints
+
+The ASP.NET Core minimal host exposes two endpoints.
+
+<CardGroup cols={2}>
+  <Card title="GET /" icon="house">
+    **Service banner.** Returns a static JSON object with the service name, status string, and runtime version.
+
+    ```json
+    {
+      "service": "waf-autoblock",
+      "status": "running",
+      "runtime": "net10.0"
+    }
+    ```
+  </Card>
+  <Card title="GET /status" icon="circle-info">
+    **Operational state.** Returns live values from `AppRuntimeState`.
+
+    ```json
+    {
+      "running": true,
+      "startedAt": "2025-01-01T00:00:00+00:00",
+      "lastSuccessfulPollAt": "2025-01-01T00:05:00+00:00",
+      "lastCleanupAt": "2025-01-01T00:05:00+00:00"
+    }
+    ```
+
+    `lastSuccessfulPollAt` and `lastCleanupAt` are `null` until the first completed cycle.
+  </Card>
+</CardGroup>

@@ -1,0 +1,132 @@
+---
+title: "HTTP Status Detection: How It Works"
+sidebarTitle: "HTTP Status Detection"
+description: "Technical deep-dive into WAF Auto-Block's HTTP error anomaly and distributed path detection algorithms, scoring formulas, and loopback exclusion logic."
+---
+
+The HTTP status detection module extends blocking beyond WAF rule hits. It analyzes HTTP response code patterns per source IP using the Cloudflare `httpRequestsAdaptiveGroups` GraphQL field and can identify two distinct attack patterns: a single IP generating an anomalous volume of error responses (per-IP code detection), and a coordinated scan where many IPs hit the same paths repeatedly (distributed path detection). Both sub-modes run within the same polling cycle as the WAF rule detector and share the same Cloudflare blocklist and TTL pipeline.
+
+## Data Source
+
+`CloudflareAnalyticsClient.GetHttpStatusSignalsAsync()` queries `httpRequestsAdaptiveGroups` for the configured `HttpStatusDetection.WindowSeconds` period (defaulting to `Polling.WindowSeconds` if not set). The query filters on `edgeResponseStatus_in` with the union of all status codes required by enabled per-IP rules and the distributed path detector.
+
+Each result group is mapped to an `HttpStatusSignalRecord` with four fields:
+
+| Field | GraphQL source | Description |
+|---|---|---|
+| `ClientIp` | `dimensions.clientIP` | Source IP address of the request. |
+| `RequestPath` | `dimensions.clientRequestPath` | URL path of the request. |
+| `StatusCode` | `dimensions.edgeResponseStatus` | HTTP response status code returned by the edge. |
+| `Count` | `count` | Number of requests matching this IP / path / code combination in the window. |
+
+<Note>
+  The `httpRequestsAdaptiveGroups` query uses a `limit: 1000` per request. If your zone generates more than 1000 distinct IP/path/code combinations in the window, some signals may be truncated.
+</Note>
+
+## Per-IP Code Detection Algorithm
+
+Per-IP code detection identifies individual source IPs whose HTTP error profile exceeds configured thresholds. The algorithm runs once per cycle for each enabled `HttpStatusCodeRuleOptions` entry.
+
+<Steps>
+  <Step title="Aggregate signals by IP">
+    All `HttpStatusSignalRecord` values returned from Cloudflare are grouped by `ClientIp` (case-insensitive). For each group, the worker calculates:
+
+    - `TotalErrors` — sum of `Count` across all signals for the IP.
+    - `DistinctPaths` — count of distinct non-empty `RequestPath` values.
+    - `CountsByStatus` — a dictionary mapping each `StatusCode` to its total count.
+  </Step>
+  <Step title="Evaluate each enabled status code rule">
+    For each `HttpStatusCodeRuleOptions` where `Enabled = true` and `StatusCode` is valid (100–599), the worker checks three conditions against the aggregate. All three must be satisfied:
+
+    1. `TotalErrors >= MinTotalErrors` (floor-clamped to 1)
+    2. `DistinctPaths >= MinDistinctPaths` (floor-clamped to 1)
+    3. `codeRatio >= MinCodeRatio` where `codeRatio = countForCode / TotalErrors`
+
+    `MinCodeRatio` is clamped to the range `[0, 1]`.
+  </Step>
+  <Step title="Block on first matching rule">
+    If all three conditions are met and the IP is not already in the local store, the IP is added to the Cloudflare list and a `BlockedIpRecord` is saved. Processing of subsequent rules for the same IP is skipped with a `break` — an IP is blocked at most once per cycle by this detector, by whichever rule matches first.
+  </Step>
+</Steps>
+
+The Cloudflare list comment for a per-IP HTTP block uses the rule's `Name` field (or `http_status_{statusCode}` if `Name` is empty):
+
+```
+auto-blocked: {detectorName} {blockedAt:O}
+```
+
+## Distributed Path Detection Algorithm
+
+Distributed path detection finds coordinated scans where multiple source IPs generate errors against the same request paths. The algorithm is two-phase and runs per configured status code in `DistributedPathDetection.StatusCodes`.
+
+### Phase 1 — Identify Suspicious Paths
+
+Signals for the target status code are first filtered through the excluded-path list (see below), then grouped by `RequestPath` (case-insensitive). A path is flagged as suspicious when both of the following hold:
+
+- `TotalErrors >= MinPathTotalErrors` (sum of all `Count` values for that path, floor 1)
+- `DistinctIps >= MinDistinctIpsPerPath` (count of unique source IPs hitting that path, floor 1)
+
+Paths that do not meet both thresholds are discarded; the remaining set forms the **suspicious paths** collection.
+
+### Phase 2 — Score IPs Against Suspicious Paths
+
+Among all signals that hit at least one suspicious path, the worker groups by `ClientIp` and computes:
+
+- `HitsOnSuspiciousPaths` — total `Count` across all signals landing on suspicious paths.
+- `DistinctSuspiciousPaths` — count of distinct suspicious paths the IP hit.
+
+An IP is blocked if both conditions are true:
+
+- `HitsOnSuspiciousPaths >= MinIpHitsOnSuspiciousPaths` (floor 1)
+- `DistinctSuspiciousPaths >= MinDistinctSuspiciousPathsPerIp` (floor 1)
+
+The Cloudflare list comment for a distributed path block uses the pattern `{Name}_{statusCode}` (e.g. `http_status_distributed_scan_404`):
+
+```
+auto-blocked: {detectorName}_{statusCode} {blockedAt:O}
+```
+
+### Path Exclusions
+
+Before phase 1, signals whose `RequestPath` matches any entry in `DistributedPathDetection.ExcludedPaths` are removed. Exclusion supports two forms:
+
+- **Exact match** — `"/favicon.ico"` excludes only that path.
+- **Prefix wildcard** — `"/api/*"` excludes any path whose prefix is `/api/`.
+
+Matching is case-insensitive. Paths excluded here are still present in the raw signal log for debugging purposes.
+
+## Loopback Exclusion
+
+Both the per-IP and distributed path detectors skip source addresses that resolve to the local machine. The check covers four forms:
+
+- The string literal `"localhost"` (case-insensitive)
+- `127.0.0.1` (IPv4 loopback, via `IPAddress.IsLoopback`)
+- `::1` (IPv6 loopback, via `IPAddress.IsLoopback`)
+- IPv4-mapped IPv6 addresses (e.g. `::ffff:127.0.0.1`) where the mapped IPv4 address is itself a loopback address
+
+Excluded loopback IPs are still written to the log at `Information` level so that internal traffic patterns remain observable. The worker also logs a summary count of excluded loopback aggregates at the end of each cycle.
+
+## Interaction Between Detectors
+
+WAF rule blocking, per-IP HTTP code detection, and distributed path detection all run sequentially within the same worker cycle. Deduplication is enforced by `SqliteBlockedIpStore.IsBlockedAsync()` before any Cloudflare API call is made.
+
+The practical effect is:
+
+- If a WAF rule blocks an IP during the first phase of the cycle, that IP will be skipped when the HTTP detectors evaluate it in the same cycle.
+- If the per-IP HTTP code detector blocks an IP, the distributed path detector will skip it when it encounters the same IP.
+- An IP already present from a previous cycle is never re-evaluated until its TTL expires and the cleanup pass removes its record.
+
+<Tip>
+  If you observe that an IP is blocked by one detector but you expected it to be evaluated by another, check whether a prior detector already added it to the local store. The `GET /status` endpoint and structured log output together provide the cycle-level context to confirm which detector fired.
+</Tip>
+
+## Synthetic Rule IDs
+
+HTTP-status-triggered blocks are not associated with real Cloudflare WAF rule IDs. The worker assigns synthetic identifiers for the `rule_id` column in `blocked_ips` so that the origin of each block remains traceable in local records and logs.
+
+| Detector | Synthetic rule ID pattern | Example |
+|---|---|---|
+| Per-IP code detection | `http-status-{statusCode}` | `http-status-404` |
+| Distributed path detection | `http-status-distributed-{statusCode}` | `http-status-distributed-404` |
+
+These identifiers are used only for local record-keeping and log output. They are never sent to Cloudflare and have no meaning outside the `blocked_ips` table.

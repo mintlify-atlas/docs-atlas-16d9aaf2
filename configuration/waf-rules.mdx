@@ -1,0 +1,118 @@
+---
+title: "Configure WAF Rule Monitoring"
+sidebarTitle: "WAF Rules"
+description: "Define which Cloudflare WAF rule IDs trigger automatic IP blocking, set per-rule hit thresholds, and configure TTL durations for each block."
+---
+
+WAF rule monitoring is the primary detection mode in WAF Auto-Block. You explicitly configure which Cloudflare WAF rule IDs the service should watch. Any rule ID that is not listed in the `Rules` array is silently ignored — this is by design, ensuring the service only reacts to patterns you have consciously opted into rather than blocking on unexpected or transient rule matches.
+
+## Rule Configuration Shape
+
+Each entry in the `Rules` array describes one Cloudflare WAF rule to monitor:
+
+```json
+{
+  "Rules": [
+    {
+      "Name": "php_scan",
+      "RuleId": "<cloudflare-rule-id>",
+      "Threshold": 1,
+      "TtlMinutes": 1440,
+      "Enabled": true
+    }
+  ]
+}
+```
+
+## Rule Fields
+
+<ParamField path="Rules[].Name" type="string" required>
+  A friendly label for this rule. Used in log messages and as the comment written to the Cloudflare IP list entry when a block is created. Choose a name that is descriptive enough to identify the attack pattern at a glance (e.g. `php_scan`, `geo_block`, `wordpress_probe`).
+</ParamField>
+
+<ParamField path="Rules[].RuleId" type="string" required>
+  The exact Cloudflare WAF rule ID to monitor. Must match the rule ID string used by Cloudflare in WAF analytics events. Rule IDs are zone-specific — the same logical rule in two different zones will have different IDs.
+</ParamField>
+
+<ParamField path="Rules[].Threshold" type="integer" default="1">
+  The minimum number of WAF events that must be observed for a given IP within the polling window before a block is triggered. A threshold of `1` means the first matching event triggers an immediate block. Raise this value to tolerate occasional false positives on noisier rules.
+</ParamField>
+
+<ParamField path="Rules[].TtlMinutes" type="integer" required>
+  How long, in minutes, a blocked IP remains on the Cloudflare account-level IP list. After this duration the service removes the IP automatically. Common values:
+  - `1440` — 24 hours
+  - `240` — 4 hours
+  - `120` — 2 hours
+</ParamField>
+
+<ParamField path="Rules[].Enabled" type="boolean" default="true">
+  When set to `false`, the rule definition is retained in configuration but the service skips it entirely during each polling cycle. Use this to temporarily disable a rule without removing it from your configuration file.
+</ParamField>
+
+## Multiple Rules Example
+
+You can watch as many rules as needed. Each rule is evaluated independently per polling cycle:
+
+```json
+{
+  "Rules": [
+    {
+      "Name": "php_scan",
+      "RuleId": "abc123def456abc123def456abc12301",
+      "Threshold": 1,
+      "TtlMinutes": 1440,
+      "Enabled": true
+    },
+    {
+      "Name": "geo_block",
+      "RuleId": "abc123def456abc123def456abc12302",
+      "Threshold": 3,
+      "TtlMinutes": 240,
+      "Enabled": true
+    }
+  ]
+}
+```
+
+## Behavior Notes
+
+- Only explicitly configured and enabled rules can trigger a block. Rule IDs observed in WAF analytics that do not appear in the `Rules` array are ignored entirely.
+- If the same rule ID appears more than once in the `Rules` array, the last entry wins and a warning is logged at startup. Deduplicate your rule list to avoid confusion.
+- If an IP is already present in the local SQLite store (from a previous block), it is not re-added and the existing TTL is not reset. Deduplication prevents redundant Cloudflare API writes.
+- TTL is counted from the moment the block is added to the IP list, not from the timestamp of the originating WAF event.
+
+<Note>
+  Rule IDs are zone-specific. Obtain them from your Cloudflare dashboard under **Security → WAF → Custom Rules**, or via the Cloudflare API by querying the `/zones/{zone_id}/firewall/rules` endpoint.
+</Note>
+
+## Debug Logging
+
+To see per-rule matching decisions in the service logs — including which rule IDs were evaluated, which IPs crossed the threshold, and which were skipped due to deduplication — set the log level for the `WafAutoblock` namespace to `Debug`:
+
+<Tabs>
+  <Tab title="Environment Variable">
+    ```bash
+    Logging__LogLevel__WafAutoblock=Debug
+    ```
+  </Tab>
+  <Tab title="appsettings.json">
+    ```json
+    {
+      "Logging": {
+        "LogLevel": {
+          "WafAutoblock": "Debug"
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="dotnet run">
+    ```powershell
+    dotnet run -- --Logging:LogLevel:WafAutoblock=Debug
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  Debug logging emits one log line per evaluated rule per polling cycle. In high-traffic environments this can produce significant log volume. Use `Debug` level only during troubleshooting and return to `Information` for normal operation.
+</Warning>

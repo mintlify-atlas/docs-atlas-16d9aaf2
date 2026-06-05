@@ -1,0 +1,162 @@
+---
+title: "WAF Auto-Block Logging Reference"
+sidebarTitle: "Logging"
+description: "WAF Auto-Block logs all polling, blocking, cleanup, and error events. Learn which log messages indicate normal operation versus problems."
+---
+
+WAF Auto-Block uses standard .NET structured logging. Log entries cover the full polling and blocking lifecycle — startup, every poll cycle, each block and unblock decision, cleanup passes, and API failures — and are designed to let you operate the service safely without reading source code. Every significant state transition emits a log entry that includes enough context to understand what happened and why.
+
+## Log Levels
+
+The default configuration emits `Information`-level logs for most components. This includes cycle start and end summaries, block and unblock events, cleanup summaries, and any error conditions.
+
+**Changing the log level**
+
+Set the `WafAutoblock`-scoped log level to `Debug` to see fine-grained matching decisions: per-candidate evaluation, threshold comparisons, and skip reasons for IPs that were considered but not blocked.
+
+Override via environment variable (recommended for Docker deployments):
+
+```bash
+Logging__LogLevel__WafAutoblock=Debug
+```
+
+Override at the command line when running locally:
+
+```powershell
+dotnet run -- --Logging:LogLevel:Default=Debug --Logging:LogLevel:WafAutoblock=Debug
+```
+
+<Tip>
+  Block and unblock events are logged at `Warning` level so they are easy to filter and alert on in log aggregation systems. Query for `level >= Warning` in your log pipeline to build a dedicated block-event feed without the noise of routine cycle summaries.
+</Tip>
+
+## Key Log Messages
+
+The entries below reflect the actual log calls in `Worker.cs`. Template placeholders like `{Ip}` and `{RuleId}` are replaced with real values at runtime.
+
+<AccordionGroup>
+  <Accordion title="WAF auto-block worker started">
+    **Level:** Information
+
+    Emitted once at startup before the first poll cycle begins. Confirms that the background service has been scheduled by the host and the SQLite store initialization is about to run.
+  </Accordion>
+
+  <Accordion title="SQLite block store initialized at {DatabasePath}">
+    **Level:** Information
+
+    Emitted after the SQLite database file has been opened (or created) and the schema has been verified. `{DatabasePath}` is the resolved absolute path to the `.db` file. If this message does not appear, the storage layer failed to initialize.
+  </Accordion>
+
+  <Accordion title="Polling skipped because Cloudflare credentials or detectors are not configured yet.">
+    **Level:** Warning
+
+    Emitted at the start of every poll cycle when the service is not yet fully configured. This happens when any required Cloudflare credential is missing (`ApiToken`, `ZoneTag`, `AccountId`, or `BlocklistId`), or when no detector (WAF rule or HTTP status code rule) is enabled. The service continues running and will retry on the next cycle — no restart is needed after completing configuration.
+  </Accordion>
+
+  <Accordion title="Polling Cloudflare for the last {WindowSeconds} seconds">
+    **Level:** Information
+
+    Emitted at the beginning of each active poll cycle. `{WindowSeconds}` reflects the configured `Polling.WindowSeconds` value (minimum 1). Seeing this message confirms credentials are present and at least one detector is enabled.
+  </Accordion>
+
+  <Accordion title="BLOCKED {Ip} via {RuleName} ({RuleId}) count {Count} threshold {Threshold} ttl {TtlMinutes}m item {ItemId}">
+    **Level:** Warning
+
+    Emitted when a WAF rule triggers a block. Fields:
+    - `{Ip}` — the offending IP address
+    - `{RuleName}` / `{RuleId}` — the matched rule's display name and Cloudflare rule ID
+    - `{Count}` — number of WAF events observed within the polling window
+    - `{Threshold}` — the configured minimum count required to block
+    - `{TtlMinutes}` — how long (in minutes) this block will be maintained
+    - `{ItemId}` — the Cloudflare account-level IP list item ID, used for TTL-based removal
+  </Accordion>
+
+  <Accordion title="BLOCKED {Ip} via {DetectorName} (HTTP {StatusCode}) totalErrors ...">
+    **Level:** Warning
+
+    Emitted when an HTTP status code detector triggers a block. Fields:
+    - `{Ip}` — the offending IP address
+    - `{DetectorName}` — the configured detector name, defaulting to `http_status_{StatusCode}`
+    - `{StatusCode}` — the HTTP status code that triggered the rule
+    - `totalErrors {TotalErrors}` — total error requests from this IP across all monitored codes
+    - `distinctPaths {DistinctPaths}` — number of distinct request paths hit
+    - `codeCount {CodeCount}` — requests matching this specific status code
+    - `ratio {CodeRatio}` — fraction of total errors attributable to this status code
+    - `ttl {TtlMinutes}m` — block duration in minutes
+    - `item {ItemId}` — Cloudflare IP list item ID
+  </Accordion>
+
+  <Accordion title="Unblocked {Ip} after TTL expiry (rule {RuleId}, item {ItemId})">
+    **Level:** Information
+
+    Emitted when a previously blocked IP has its TTL expire and is successfully removed from both the Cloudflare account-level IP list and the local SQLite store. `{RuleId}` identifies the original rule that triggered the block.
+  </Accordion>
+
+  <Accordion title="Poll cycle completed ... with {EventCount} WAF candidate events, {HttpStatusSignalCount} HTTP status signals and {BlockedCount} new blocks">
+    **Level:** Information
+
+    End-of-cycle summary emitted after both WAF rule evaluation and HTTP status detection complete. Key fields:
+    - `{EventCount}` — total WAF event records returned by Cloudflare analytics for the window
+    - `{HttpStatusSignalCount}` — total HTTP status signal records evaluated
+    - `{BlockedCount}` — net new IPs added to the blocklist in this cycle (0 is normal when no new offenders appear)
+  </Accordion>
+
+  <Accordion title="Cleanup completed ... with {RemovedCount} expired entries removed and {DeferredCount} deferred">
+    **Level:** Information
+
+    End-of-cleanup summary. `{RemovedCount}` is the number of IPs successfully removed from both Cloudflare and SQLite. `{DeferredCount}` is the number of entries whose Cloudflare item ID could not be resolved and will be retried on the next cycle.
+  </Accordion>
+
+  <Accordion title="Skipping {Ip} in HTTP status detector because it is a loopback address">
+    **Level:** Information
+
+    Emitted when an IP that meets blocking thresholds is excluded because it resolves to a loopback address (`127.0.0.1`, `::1`, `localhost`, or IPv4-mapped IPv6 loopback). Loopback addresses are monitored but never auto-blocked by design.
+  </Accordion>
+
+  <Accordion title="Rate-limited while blocking {Ip}">
+    **Level:** Warning
+
+    Emitted when the Cloudflare API returns HTTP 429 during an IP add operation. The service logs the warning and continues processing remaining candidates in the current cycle. The affected IP will be reconsidered on the next poll cycle.
+  </Accordion>
+
+  <Accordion title="Failed to block {Ip}">
+    **Level:** Error
+
+    Emitted when a non-rate-limit error occurs during an IP add operation. The exception is included in the log entry. The service continues with remaining candidates rather than aborting the cycle.
+  </Accordion>
+</AccordionGroup>
+
+## HTTP Status Detection Logs
+
+When `HttpStatusDetection.Enabled = true`, additional log entries appear at `Debug` level during per-IP threshold evaluation.
+
+| Message | Level | Meaning |
+|---|---|---|
+| `Evaluating HTTP status detector for codes {Codes} over {WindowSeconds} seconds` | Debug | Status detection sub-cycle is starting; lists all active status codes |
+| `HTTP status signal {Ip} status {StatusCode} path {Path} count {Count}` | Debug | Raw signal from Cloudflare analytics before aggregation |
+| `Skipping {Ip} for HTTP {StatusCode} because thresholds were not met (total …, paths …, ratio …)` | Debug | IP evaluated but did not meet `MinTotalErrors`, `MinDistinctPaths`, or `MinCodeRatio` |
+| `Skipping {Ip} for HTTP {StatusCode} because it is already in the local block store` | Debug | IP already blocked; evaluation short-circuits |
+| `BLOCKED {Ip} via {DetectorName} (HTTP {StatusCode}) …` | Warning | Block decision — see full field list in Key Log Messages above |
+| `Skipping {Ip} in HTTP status detector because it is a loopback address` | Information | Loopback exclusion |
+| `HTTP status detector excluded {Count} loopback IP aggregate(s) in this cycle` | Information | Cycle-level summary of loopback exclusions |
+
+### Distributed Path Detector Logs
+
+When `HttpStatusDetection.DistributedPathDetection.Enabled = true`, additional entries appear for the path-level analysis layer.
+
+| Message | Level | Meaning |
+|---|---|---|
+| `Distributed HTTP path detector found no suspicious paths for HTTP {StatusCode}` | Debug | No paths met `MinPathTotalErrors` and `MinDistinctIpsPerPath` thresholds |
+| `Skipping {Ip} in distributed HTTP path detector because thresholds were not met` | Debug | IP hit suspicious paths but below `MinIpHitsOnSuspiciousPaths` or `MinDistinctSuspiciousPathsPerIp` |
+| `BLOCKED {Ip} via {DetectorName} (HTTP {StatusCode}) suspiciousPathHits … suspiciousPathCount …` | Warning | Distributed path detector triggered a block |
+| `Skipping {Ip} in distributed HTTP path detector because it is a loopback address` | Information | Loopback exclusion in the path detector |
+| `Distributed HTTP path detector evaluated codes {StatusCodes} and blocked {BlockedCount}` | Information | End-of-detector summary |
+
+## Log Level Recommendations
+
+| Scenario | Recommended Level | Reason |
+|---|---|---|
+| Production steady-state | `Information` | Cycle summaries and block/unblock events without per-candidate noise |
+| Troubleshooting missing blocks | `Debug` for `WafAutoblock` | Exposes skip reasons, rule ID mismatches, and threshold comparisons |
+| Alerting integrations | `Warning` or above | Block events, rate-limit warnings, and poll skip warnings — no routine chatter |
+| Initial setup validation | `Debug` | See every candidate event and matching decision to confirm rule IDs are correct |

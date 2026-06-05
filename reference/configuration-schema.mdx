@@ -1,0 +1,404 @@
+---
+title: "WAF Auto-Block Full Configuration Schema"
+sidebarTitle: "Configuration Schema"
+description: "Complete configuration schema for WAF Auto-Block covering all options, types, defaults, and validation rules extracted from source."
+---
+
+This page documents every configurable property in WAF Auto-Block, with types, defaults, and constraints taken directly from the `WafAutoblockOptions` C# source. All values can be set in `appsettings.json` or via environment variables. Environment variables always take precedence over file-based values, and use double underscores as separators — for example, `Cloudflare__ApiToken` maps to `Cloudflare.ApiToken` in JSON.
+
+---
+
+## CloudflareOptions
+
+The `Cloudflare` section provides the credentials and target identifiers the service needs to query Cloudflare analytics and manage the account-level IP blocklist. All four fields are required — the service skips polling entirely if any of them is missing or empty.
+
+<ParamField path="Cloudflare.ApiToken" type="string" required>
+  Cloudflare API bearer token. This token is sent as `Authorization: Bearer <token>` on every request to the Cloudflare GraphQL and REST APIs. Scope it to the minimum permissions described in the [Security](/reference/security) page.
+
+  **Environment variable:** `Cloudflare__ApiToken`
+</ParamField>
+
+<ParamField path="Cloudflare.ZoneTag" type="string" required>
+  The Cloudflare zone ID (not the zone name) for the zone whose WAF analytics you want to monitor. You can find this value in the Cloudflare dashboard under **Overview** for your domain.
+
+  **Environment variable:** `Cloudflare__ZoneTag`
+</ParamField>
+
+<ParamField path="Cloudflare.AccountId" type="string" required>
+  Cloudflare account ID used for all account-level list management operations (add/remove IP entries). This must be the account that owns the IP list referenced by `BlocklistId`.
+
+  **Environment variable:** `Cloudflare__AccountId`
+</ParamField>
+
+<ParamField path="Cloudflare.BlocklistId" type="string" required>
+  Either the UUID of an existing Cloudflare account-level IP list, or a symbolic name prefixed with `$` (for example `$auto_blocked_ips`). When using a symbolic name the service resolves it to a list UUID at startup. In Docker Compose env files, escape the dollar sign as `$$` so Compose passes the literal `$` character to the container.
+
+  **Environment variable:** `Cloudflare__BlocklistId`
+</ParamField>
+
+---
+
+## PollingOptions
+
+The `Polling` section controls how frequently the worker runs and how large the analytics lookback window is. These settings directly affect both detection latency and the load placed on the Cloudflare GraphQL API.
+
+<ParamField path="Polling.IntervalSeconds" type="integer" default={15}>
+  How often (in seconds) the worker wakes up and runs a full poll-and-cleanup cycle. Values below 1 are treated as 1. Shorter intervals mean faster blocking reactions but more API calls per hour.
+
+  **Environment variable:** `Polling__IntervalSeconds`
+</ParamField>
+
+<ParamField path="Polling.WindowSeconds" type="integer" default={20}>
+  The lookback window (in seconds) used when querying Cloudflare WAF analytics. The code default is 20 seconds; the recommended production value is 300 (five minutes) to match `HttpStatusDetection.WindowSeconds`. **Always set this explicitly in production.**
+
+  **Environment variable:** `Polling__WindowSeconds`
+</ParamField>
+
+<ParamField path="Polling.JitterMilliseconds" type="integer" default={2000}>
+  Maximum random jitter (in milliseconds) added before each poll cycle begins. The actual delay is a random value between 0 and this number. This prevents multiple instances or restarts from hammering the Cloudflare API simultaneously.
+
+  **Environment variable:** `Polling__JitterMilliseconds`
+</ParamField>
+
+<Note>
+  The `WindowSeconds` defaults differ between `PollingOptions` (20 seconds in code) and `HttpStatusDetectionOptions` (300 seconds). Always set `Polling.WindowSeconds` explicitly to your intended window in production.
+</Note>
+
+---
+
+## StorageOptions
+
+The `Storage` section configures where WAF Auto-Block writes its local SQLite state. The database records every active block, the associated Cloudflare list item ID, and the expiry timestamp so the cleanup loop can remove blocks automatically when their TTL elapses.
+
+<ParamField path="Storage.DatabasePath" type="string" default="./data/state.db">
+  Path to the SQLite database file. Relative paths are resolved from the application working directory. The directory component is created automatically if it does not exist, so you do not need to pre-create it. When running in Docker, mount a host volume at `./data` to ensure the database persists across container restarts.
+
+  **Environment variable:** `Storage__DatabasePath`
+</ParamField>
+
+---
+
+## RuleMonitorOptions (Rules\[\])
+
+The `Rules` array defines the Cloudflare WAF rules that WAF Auto-Block will react to. Each element is an independent rule definition. Only rules that are explicitly listed here — and have `Enabled` set to `true` — can ever trigger a block. Unknown or unconfigured `RuleId` values encountered in analytics are silently ignored.
+
+<ParamField path="Rules[n].Name" type="string" required>
+  Display name used in log output and as the comment on Cloudflare list entries. Choose a short, descriptive slug — for example `php_scan` or `geo_block`. This value has no effect on matching logic.
+
+  **Environment variable:** `Rules__0__Name`, `Rules__1__Name`, …
+</ParamField>
+
+<ParamField path="Rules[n].RuleId" type="string" required>
+  Exact Cloudflare WAF rule ID to monitor. Matching is case-insensitive. You can find rule IDs in the Cloudflare WAF dashboard or via the Cloudflare API. Only events whose `ruleId` matches this value will count toward the threshold.
+
+  **Environment variable:** `Rules__0__RuleId`, `Rules__1__RuleId`, …
+</ParamField>
+
+<ParamField path="Rules[n].Threshold" type="integer">
+  Minimum number of WAF hit events from a single IP within the polling window required to trigger a block. There is no built-in default — this must be configured explicitly for every rule. A value of `1` blocks on the first observed hit.
+
+  **Environment variable:** `Rules__0__Threshold`, `Rules__1__Threshold`, …
+</ParamField>
+
+<ParamField path="Rules[n].TtlMinutes" type="integer" required>
+  Block duration in minutes. The service records this expiry time in SQLite and removes the IP from the Cloudflare list when the TTL elapses. Minimum effective value is 1 minute. Common values: `240` (4 hours), `1440` (24 hours).
+
+  **Environment variable:** `Rules__0__TtlMinutes`, `Rules__1__TtlMinutes`, …
+</ParamField>
+
+<ParamField path="Rules[n].Enabled" type="boolean" default={true}>
+  Whether this rule definition is active. Set to `false` to pause a rule without removing it from configuration. Disabled rules are never matched and never trigger blocks.
+
+  **Environment variable:** `Rules__0__Enabled`, `Rules__1__Enabled`, …
+</ParamField>
+
+---
+
+## HttpStatusDetectionOptions
+
+The `HttpStatusDetection` section enables an additional detection layer that works independently of WAF rule IDs. Instead of watching for specific WAF rule hits, this module analyzes HTTP response-code patterns per source IP and blocks IPs that exhibit anomalous error behavior within the configured window.
+
+<ParamField path="HttpStatusDetection.Enabled" type="boolean" default={false}>
+  Master switch for the entire HTTP status detection subsystem. When `false`, neither the per-code rules nor the distributed path detector runs, regardless of their individual `Enabled` flags.
+
+  **Environment variable:** `HttpStatusDetection__Enabled`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.WindowSeconds" type="integer" default={300}>
+  Lookback window (in seconds) used when querying Cloudflare HTTP analytics. Defaults to 300 seconds (five minutes). Keep this aligned with `Polling.WindowSeconds` unless you have a specific reason to diverge.
+
+  **Environment variable:** `HttpStatusDetection__WindowSeconds`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.Codes" type="array">
+  Array of `HttpStatusCodeRuleOptions` objects. Each entry defines detection thresholds for a single HTTP status code. See [HttpStatusCodeRuleOptions](#httpstatuscoderuloptions-httpstatusdetection-codes) below.
+
+  **Environment variable prefix:** `HttpStatusDetection__Codes__0__`, `HttpStatusDetection__Codes__1__`, …
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection" type="object">
+  Configuration for the distributed path detector, which groups suspicious error paths across multiple source IPs. See [DistributedPathDetectionOptions](#distributedpathdetectionoptions) below.
+</ParamField>
+
+### HttpStatusCodeRuleOptions (HttpStatusDetection.Codes\[\])
+
+Each element in the `Codes` array monitors a single HTTP status code and evaluates three independent thresholds against every source IP seen in the analytics window. An IP is blocked only when all enabled thresholds are simultaneously exceeded.
+
+<ParamField path="HttpStatusDetection.Codes[n].StatusCode" type="integer">
+  The HTTP status code to monitor. Must be in the range 100–599. Typical values are `400`, `403`, `404`, and `500`.
+
+  **Environment variable:** `HttpStatusDetection__Codes__0__StatusCode`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.Codes[n].Enabled" type="boolean" default={true}>
+  Whether this per-code rule is active. Set to `false` to disable detection for this specific status code without removing the configuration entry.
+
+  **Environment variable:** `HttpStatusDetection__Codes__0__Enabled`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.Codes[n].MinTotalErrors" type="integer" default={20}>
+  Minimum total error hits across **all** configured status codes for a given IP within the window. This guards against false positives from IPs that hit only a handful of errors.
+
+  **Environment variable:** `HttpStatusDetection__Codes__0__MinTotalErrors`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.Codes[n].MinDistinctPaths" type="integer" default={10}>
+  Minimum number of distinct request paths the IP must have touched across all configured codes. A high distinct-path count distinguishes systematic scanning from isolated errors.
+
+  **Environment variable:** `HttpStatusDetection__Codes__0__MinDistinctPaths`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.Codes[n].MinCodeRatio" type="number" default={0.7}>
+  Minimum ratio of this status code's hits to the IP's total hits across all configured status codes. Expressed as a decimal between `0.0` and `1.0`. For example `0.7` means at least 70% of the IP's total errors must be this specific code.
+
+  **Environment variable:** `HttpStatusDetection__Codes__0__MinCodeRatio`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.Codes[n].TtlMinutes" type="integer" default={240}>
+  Block duration in minutes for IPs matched by this code rule. Uses the same TTL pipeline as WAF rule blocks.
+
+  **Environment variable:** `HttpStatusDetection__Codes__0__TtlMinutes`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.Codes[n].Name" type="string">
+  Label used in log output and Cloudflare list entry comments for blocks triggered by this rule. If left empty the service uses `http_status_{statusCode}` as the default label.
+
+  **Environment variable:** `HttpStatusDetection__Codes__0__Name`
+</ParamField>
+
+### DistributedPathDetectionOptions
+
+The distributed path detector groups error signals by request path across multiple source IPs. A path is flagged as suspicious when too many distinct IPs are hitting it with errors. IPs that participate in enough suspicious paths are then blocked. This approach catches coordinated scans where each individual IP keeps its hit count low.
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.Enabled" type="boolean" default={false}>
+  Whether distributed path detection is active. Can be enabled independently of the per-code `Codes` rules.
+
+  **Environment variable:** `HttpStatusDetection__DistributedPathDetection__Enabled`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.StatusCodes" type="integer[]">
+  List of HTTP status codes to include when grouping path-level signals. Recommended values: `[404, 400, 500, 403]`. When this array is non-empty it takes precedence over the legacy single `StatusCode` field. Set individual elements via environment variables as `StatusCodes__0`, `StatusCodes__1`, etc.
+
+  **Environment variable:** `HttpStatusDetection__DistributedPathDetection__StatusCodes__0`, `…__1`, …
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.StatusCode" type="integer" default={404}>
+  Legacy single-code fallback. Used only when `StatusCodes` is empty. Retained for backwards compatibility.
+
+  **Environment variable:** `HttpStatusDetection__DistributedPathDetection__StatusCode`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.MinPathTotalErrors" type="integer" default={20}>
+  Minimum total error count on a single path (across all source IPs) before that path is considered suspicious.
+
+  **Environment variable:** `HttpStatusDetection__DistributedPathDetection__MinPathTotalErrors`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.MinDistinctIpsPerPath" type="integer" default={5}>
+  Minimum number of distinct source IPs that must have hit a path (above `MinPathTotalErrors`) for that path to be flagged as suspicious.
+
+  **Environment variable:** `HttpStatusDetection__DistributedPathDetection__MinDistinctIpsPerPath`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.MinIpHitsOnSuspiciousPaths" type="integer" default={2}>
+  Minimum number of hits a single IP must have across all currently suspicious paths before it is considered a candidate for blocking.
+
+  **Environment variable:** `HttpStatusDetection__DistributedPathDetection__MinIpHitsOnSuspiciousPaths`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.MinDistinctSuspiciousPathsPerIp" type="integer" default={1}>
+  Minimum number of distinct suspicious paths an IP must appear on before it is blocked. Raising this above 1 reduces false positives against IPs that hit only a single popular scan target.
+
+  **Environment variable:** `HttpStatusDetection__DistributedPathDetection__MinDistinctSuspiciousPathsPerIp`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.TtlMinutes" type="integer" default={120}>
+  Block duration in minutes for IPs blocked by the distributed path detector.
+
+  **Environment variable:** `HttpStatusDetection__DistributedPathDetection__TtlMinutes`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.Name" type="string" default="http_404_distributed_scan">
+  Label used in logs and Cloudflare list entry comments for blocks triggered by this detector.
+
+  **Environment variable:** `HttpStatusDetection__DistributedPathDetection__Name`
+</ParamField>
+
+<ParamField path="HttpStatusDetection.DistributedPathDetection.ExcludedPaths" type="string[]" default={[]}>
+  Paths to exclude from suspicious-path analysis. Supports an exact match or a prefix wildcard using a trailing `*` — for example `/api/health*` excludes all paths beginning with `/api/health`. Common exclusions: `/`, `/favicon.ico`.
+
+  **Environment variable:** `HttpStatusDetection__DistributedPathDetection__ExcludedPaths__0`, `…__1`, …
+</ParamField>
+
+---
+
+## Complete Example
+
+The following `appsettings.json` block shows all sections populated with realistic production-ready values. Copy and adjust to your environment — at minimum fill in the four `Cloudflare` credentials and replace the placeholder `RuleId` values with your actual Cloudflare WAF rule IDs.
+
+```json
+{
+  "Cloudflare": {
+    "ApiToken": "your-scoped-cloudflare-api-token",
+    "ZoneTag": "your-zone-id",
+    "AccountId": "your-account-id",
+    "BlocklistId": "$auto_blocked_ips"
+  },
+  "Polling": {
+    "IntervalSeconds": 15,
+    "WindowSeconds": 300,
+    "JitterMilliseconds": 2000
+  },
+  "Storage": {
+    "DatabasePath": "./data/state.db"
+  },
+  "Rules": [
+    {
+      "Name": "php_scan",
+      "RuleId": "<cloudflare-waf-rule-id>",
+      "Threshold": 1,
+      "TtlMinutes": 1440,
+      "Enabled": true
+    },
+    {
+      "Name": "geo_block",
+      "RuleId": "<cloudflare-waf-rule-id>",
+      "Threshold": 3,
+      "TtlMinutes": 240,
+      "Enabled": true
+    }
+  ],
+  "HttpStatusDetection": {
+    "Enabled": true,
+    "WindowSeconds": 300,
+    "DistributedPathDetection": {
+      "Enabled": true,
+      "StatusCodes": [404, 400, 500, 403],
+      "MinPathTotalErrors": 12,
+      "MinDistinctIpsPerPath": 3,
+      "MinIpHitsOnSuspiciousPaths": 2,
+      "MinDistinctSuspiciousPathsPerIp": 1,
+      "TtlMinutes": 120,
+      "Name": "http_status_distributed_scan",
+      "ExcludedPaths": ["/", "/favicon.ico"]
+    },
+    "Codes": [
+      {
+        "StatusCode": 404,
+        "Enabled": true,
+        "MinTotalErrors": 20,
+        "MinDistinctPaths": 8,
+        "MinCodeRatio": 0.7,
+        "TtlMinutes": 240,
+        "Name": "http_404_scan"
+      },
+      {
+        "StatusCode": 400,
+        "Enabled": true,
+        "MinTotalErrors": 15,
+        "MinDistinctPaths": 6,
+        "MinCodeRatio": 0.6,
+        "TtlMinutes": 120,
+        "Name": "http_400_abuse"
+      },
+      {
+        "StatusCode": 500,
+        "Enabled": false,
+        "MinTotalErrors": 25,
+        "MinDistinctPaths": 5,
+        "MinCodeRatio": 0.6,
+        "TtlMinutes": 60,
+        "Name": "http_500_error_flood"
+      }
+    ]
+  }
+}
+```
+
+The equivalent representation using environment variables — suitable for a `.env` file passed to Docker — follows the same structure with `__` as the section separator:
+
+```bash
+# Cloudflare credentials
+Cloudflare__ApiToken=your-scoped-cloudflare-api-token
+Cloudflare__ZoneTag=your-zone-id
+Cloudflare__AccountId=your-account-id
+# Use $$ in Docker Compose env files to pass a literal $ character
+Cloudflare__BlocklistId=$$auto_blocked_ips
+
+# Polling
+Polling__IntervalSeconds=15
+Polling__WindowSeconds=300
+Polling__JitterMilliseconds=2000
+
+# Storage
+Storage__DatabasePath=./data/state.db
+
+# Rule definitions
+Rules__0__Name=php_scan
+Rules__0__RuleId=<cloudflare-waf-rule-id>
+Rules__0__Threshold=1
+Rules__0__TtlMinutes=1440
+Rules__0__Enabled=true
+
+Rules__1__Name=geo_block
+Rules__1__RuleId=<cloudflare-waf-rule-id>
+Rules__1__Threshold=3
+Rules__1__TtlMinutes=240
+Rules__1__Enabled=true
+
+# HTTP status detection
+HttpStatusDetection__Enabled=true
+HttpStatusDetection__WindowSeconds=300
+
+# Distributed path detector
+HttpStatusDetection__DistributedPathDetection__Enabled=true
+HttpStatusDetection__DistributedPathDetection__StatusCodes__0=404
+HttpStatusDetection__DistributedPathDetection__StatusCodes__1=400
+HttpStatusDetection__DistributedPathDetection__StatusCodes__2=500
+HttpStatusDetection__DistributedPathDetection__StatusCodes__3=403
+HttpStatusDetection__DistributedPathDetection__MinPathTotalErrors=12
+HttpStatusDetection__DistributedPathDetection__MinDistinctIpsPerPath=3
+HttpStatusDetection__DistributedPathDetection__MinIpHitsOnSuspiciousPaths=2
+HttpStatusDetection__DistributedPathDetection__MinDistinctSuspiciousPathsPerIp=1
+HttpStatusDetection__DistributedPathDetection__TtlMinutes=120
+HttpStatusDetection__DistributedPathDetection__Name=http_status_distributed_scan
+HttpStatusDetection__DistributedPathDetection__ExcludedPaths__0=/
+HttpStatusDetection__DistributedPathDetection__ExcludedPaths__1=/favicon.ico
+
+# Per-code rules
+HttpStatusDetection__Codes__0__StatusCode=404
+HttpStatusDetection__Codes__0__Enabled=true
+HttpStatusDetection__Codes__0__MinTotalErrors=20
+HttpStatusDetection__Codes__0__MinDistinctPaths=8
+HttpStatusDetection__Codes__0__MinCodeRatio=0.7
+HttpStatusDetection__Codes__0__TtlMinutes=240
+HttpStatusDetection__Codes__0__Name=http_404_scan
+
+HttpStatusDetection__Codes__1__StatusCode=400
+HttpStatusDetection__Codes__1__Enabled=true
+HttpStatusDetection__Codes__1__MinTotalErrors=15
+HttpStatusDetection__Codes__1__MinDistinctPaths=6
+HttpStatusDetection__Codes__1__MinCodeRatio=0.6
+HttpStatusDetection__Codes__1__TtlMinutes=120
+HttpStatusDetection__Codes__1__Name=http_400_abuse
+```

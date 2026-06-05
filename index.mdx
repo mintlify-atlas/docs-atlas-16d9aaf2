@@ -1,20 +1,64 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "WAF Auto-Block: Automated IP Blocking for Cloudflare"
+sidebarTitle: "Home"
+description: "WAF Auto-Block is a .NET 10 background service that watches Cloudflare WAF analytics and automatically blocks offending IPs with configurable TTL-based expiry."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+WAF Auto-Block bridges the gap between Cloudflare's WAF analytics and its account-level IP lists. It continuously polls your zone's firewall events, matches hits against your configured rules, adds offending IPs to a Cloudflare blocklist, and removes them automatically when their TTL expires — all without manual intervention.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="shield-halved" href="/introduction">
+    Understand what WAF Auto-Block does, why it exists, and how it fits into your Cloudflare setup.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get the service running locally or in Docker in under 10 minutes.
+  </Card>
+  <Card title="Cloudflare Setup" icon="cloud" href="/cloudflare-setup">
+    Create the IP list, WAF rule, and scoped API token required before running the service.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/configuration/overview">
+    Explore all configuration options for polling, rules, HTTP detection, and storage.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## How It Works
+
+WAF Auto-Block runs as a containerized .NET background service. On every polling cycle it:
+
+<Steps>
+  <Step title="Queries Cloudflare GraphQL Analytics">
+    Fetches recent firewall events and HTTP status signals for your zone using the Cloudflare Analytics GraphQL API.
+  </Step>
+  <Step title="Matches Configured Rules">
+    Filters results against your explicitly configured WAF rule IDs and HTTP status code thresholds. Unknown rule IDs are ignored by design.
+  </Step>
+  <Step title="Blocks Qualifying IPs">
+    Adds offending IPs to your Cloudflare account-level IP list and records the block in a local SQLite store with an expiration timestamp.
+  </Step>
+  <Step title="Expires and Removes Blocks">
+    Removes IPs from the Cloudflare list and the local store when their configured TTL elapses — no manual cleanup needed.
+  </Step>
+</Steps>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="WAF Rule Blocking" icon="ban" href="/configuration/waf-rules">
+    Block IPs that exceed hit thresholds for specific Cloudflare WAF rule IDs, with per-rule TTL settings.
+  </Card>
+  <Card title="HTTP Status Detection" icon="triangle-exclamation" href="/configuration/http-status-detection">
+    Detect scanning and abuse patterns by analyzing HTTP error rates, distinct paths, and per-code ratios per IP.
+  </Card>
+  <Card title="Distributed Path Detection" icon="network-wired" href="/reference/http-status-detection">
+    Identify coordinated scans across multiple IPs by grouping error signals at the path level.
+  </Card>
+  <Card title="TTL-Based Expiry" icon="clock" href="/reference/blocking-lifecycle">
+    All blocks expire automatically — the service manages the full lifecycle without Cloudflare-native TTLs.
+  </Card>
+  <Card title="Docker Deployment" icon="docker" href="/deployment/docker">
+    Run with a single Docker command or Docker Compose, with environment-variable configuration and persistent SQLite storage.
+  </Card>
+  <Card title="Status Endpoint" icon="circle-check" href="/operations/status-endpoint">
+    Monitor the service health and last poll time via the built-in GET /status endpoint.
+  </Card>
+</CardGroup>

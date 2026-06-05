@@ -1,0 +1,103 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "WAF Auto-Block",
+  "projectDescription": "A .NET 10 background service that watches Cloudflare WAF analytics, auto-blocks offending IPs on a Cloudflare account-level IP list, and manages TTL-based expiry using a local SQLite store.",
+  "theme": "aspen",
+  "primaryColor": "#F6821F",
+  "lightColor": "#FBBF7A",
+  "darkColor": "#C4611A",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "cloudflare-setup"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/overview",
+              "configuration/waf-rules",
+              "configuration/http-status-detection",
+              "configuration/environment-variables"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker",
+              "deployment/docker-compose",
+              "deployment/upgrade-rollback"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/status-endpoint",
+              "operations/logging",
+              "operations/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Architecture",
+            "pages": [
+              "reference/architecture",
+              "reference/blocking-lifecycle",
+              "reference/http-status-detection"
+            ]
+          },
+          {
+            "group": "Configuration Reference",
+            "pages": [
+              "reference/configuration-schema",
+              "reference/security"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Automatic IP blocking triggered by Cloudflare WAF rule hits",
+    "HTTP status code anomaly detection (400, 404, 403, 500, etc.) per IP",
+    "Distributed path detection to identify coordinated scanning across multiple IPs",
+    "TTL-based expiry — blocks are automatically removed from Cloudflare after a configurable duration",
+    "SQLite-backed local state store for block persistence and TTL tracking",
+    "Configurable polling interval, jitter, and analysis window",
+    "Loopback/localhost exclusion from HTTP status auto-blocking",
+    "Status endpoint (GET /status) for operational visibility",
+    "Docker and Docker Compose deployment with environment-variable configuration",
+    "Symbolic Cloudflare list name resolution (e.g. $auto_blocked_ips)"
+  ],
+  "publicApiSurface": [
+    "GET / — service banner",
+    "GET /status — returns running state, startedAt, lastSuccessfulPollAt, lastCleanupAt",
+    "WafAutoblockOptions — root configuration class (Cloudflare, Polling, Storage, Rules, HttpStatusDetection)",
+    "CloudflareOptions — ApiToken, ZoneTag, AccountId, BlocklistId",
+    "PollingOptions — IntervalSeconds, WindowSeconds, JitterMilliseconds",
+    "StorageOptions — DatabasePath",
+    "RuleMonitorOptions — Name, RuleId, Threshold, TtlMinutes, Enabled",
+    "HttpStatusDetectionOptions — Enabled, WindowSeconds, Codes[], DistributedPathDetection",
+    "HttpStatusCodeRuleOptions — StatusCode, Enabled, MinTotalErrors, MinDistinctPaths, MinCodeRatio, TtlMinutes, Name",
+    "DistributedPathDetectionOptions — Enabled, StatusCodes[], MinPathTotalErrors, MinDistinctIpsPerPath, MinIpHitsOnSuspiciousPaths, MinDistinctSuspiciousPathsPerIp, TtlMinutes, Name, ExcludedPaths[]",
+    "ICloudflareAnalyticsClient.GetOffendingTrafficAsync",
+    "ICloudflareAnalyticsClient.GetHttpStatusSignalsAsync",
+    "ICloudflareBlocklistClient.AddIpAsync",
+    "ICloudflareBlocklistClient.RemoveIpAsync",
+    "ICloudflareBlocklistClient.ResolveItemIdByIpAsync",
+    "IBlockedIpStore.IsBlockedAsync / SaveAsync / GetExpiredAsync / DeleteAsync",
+    "IRuleMatcher.TryResolve",
+    "IBlockingExpirationCalculator.GetExpiresAt"
+  ]
+}

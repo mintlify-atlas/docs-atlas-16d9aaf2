@@ -1,0 +1,109 @@
+---
+title: "Configure Cloudflare for WAF Auto-Block"
+sidebarTitle: "Cloudflare Setup"
+description: "Create the account-level IP list, WAF custom rule, and scoped API token that WAF Auto-Block needs before it can block and unblock IPs."
+---
+
+WAF Auto-Block depends on three Cloudflare resources that must exist before the service starts: an account-level IP list that holds the addresses it blocks, a WAF custom rule in your zone that enforces the block when a source IP appears in that list, and a scoped API token the service uses to read analytics and manage the list. The service cannot function correctly if any of these are missing — it will start and poll successfully, but IPs it tries to add will fail if the list does not exist, and IPs that are successfully added will have no effect if the WAF rule is not active. Work through the steps below in order before proceeding to the [Quickstart](/quickstart).
+
+<Steps>
+  <Step title="Create an account-level IP list">
+    Account-level IP lists are managed from your Cloudflare dashboard at the account scope, not the zone scope.
+
+    1. Log in to the [Cloudflare dashboard](https://dash.cloudflare.com).
+    2. Select **Account Home** from the top navigation and choose your account.
+    3. Navigate to **Manage Account → Lists**.
+    4. Click **Create a list**.
+    5. Set the list type to **IP**.
+    6. Give it a descriptive name such as `auto_blocked_ips`. The name must contain only lowercase letters, digits, and underscores.
+    7. Click **Create**.
+
+    After creation, Cloudflare assigns the list a UUID. You can find it in the URL when viewing the list, or via the Cloudflare API. Record this ID — you will use it as the value of `Cloudflare__BlocklistId` in your service configuration.
+
+    <Tip>
+      You can pass the blocklist by its symbolic name (e.g. `$auto_blocked_ips`) in the `Cloudflare__BlocklistId` setting instead of its raw UUID. The service resolves the symbolic name to the list UUID at startup. When storing this value in a Docker Compose env file, write it as `$$auto_blocked_ips` (double dollar sign) so Compose does not expand it as a shell variable before passing it to the container.
+    </Tip>
+  </Step>
+
+  <Step title="Create a WAF custom rule that enforces the blocklist">
+    The IP list alone does not block any traffic. You need a WAF custom rule in your zone that tells Cloudflare to block requests when the source IP is present in the list.
+
+    1. In the Cloudflare dashboard, select your zone.
+    2. Navigate to **Security → WAF → Custom Rules**.
+    3. Click **Create rule**.
+    4. Give the rule a name such as `Block auto-blocked IPs`.
+    5. In the rule expression field, enter:
+
+        ```text
+        ip.src in $auto_blocked_ips
+        ```
+
+        Replace `auto_blocked_ips` with the name you chose for your list if it differs.
+
+    6. Set the action to **Block**.
+    7. Set the rule's position so it executes at a **higher priority** (lower order number) than the WAF rules you want WAF Auto-Block to react to. This ensures that once an IP is added to the list it is blocked immediately, even if it continues to trigger the lower-priority rules.
+    8. Enable the rule and save.
+
+    <Note>
+      The WAF custom rule that blocks `ip.src in $auto_blocked_ips` must be active **before** the service starts adding IPs. Cloudflare evaluates rules in priority order — if this rule is disabled or positioned after the rules that trigger blocking, IPs added by WAF Auto-Block will not be blocked by Cloudflare even though they appear in the list.
+    </Note>
+  </Step>
+
+  <Step title="Identify the WAF rule IDs you want to monitor">
+    WAF Auto-Block uses an explicit allowlist of Cloudflare WAF rule IDs. Events for any rule that is not in your configuration are ignored by design. You must find the exact Cloudflare rule ID for each rule you want the service to react to.
+
+    To locate a rule ID:
+
+    1. In the Cloudflare dashboard, navigate to **Security → WAF**.
+    2. Browse your Managed Rules or Custom Rules and open the rule you want to monitor.
+    3. The rule ID is displayed in the rule details. For managed rules, it is typically a long hex string such as `100015` or a UUID. Copy the exact value — rule IDs are case-sensitive.
+
+    You will add each rule ID to the service configuration using the pattern:
+
+    ```ini
+    Rules__0__Name=php_scan
+    Rules__0__RuleId=<exact-rule-id-from-cloudflare>
+    Rules__0__Threshold=1
+    Rules__0__TtlMinutes=240
+    Rules__0__Enabled=true
+    ```
+
+    Repeat the block with `Rules__1__`, `Rules__2__`, etc. for additional rules. Each rule has its own independent threshold and TTL.
+  </Step>
+
+  <Step title="Create a scoped API token">
+    WAF Auto-Block requires a Cloudflare API token — not a Global API Key. The token needs exactly two permission scopes.
+
+    1. Log in to the Cloudflare dashboard and click your profile icon in the top right.
+    2. Select **My Profile → API Tokens**.
+    3. Click **Create Token**.
+    4. Choose **Create Custom Token**.
+    5. Add the following permissions:
+       - Under **Zone permissions**, add **Analytics → Read**. Set the zone scope to the specific zone you want to monitor.
+       - Under **Account permissions**, add **Account Filter Lists → Edit**. Set the account scope to the account that owns your IP list.
+    6. Set an appropriate expiration if your security policy requires token rotation.
+    7. Click **Continue to summary**, review the scopes, then click **Create Token**.
+    8. Copy the token value immediately — Cloudflare will not show it again.
+
+    Store the token value in your `waf-autoblock.env` file or your secret store of choice:
+
+    ```ini
+    Cloudflare__ApiToken=your-token-value-here
+    ```
+
+    <Warning>
+      Do not use a Global API Key. Do not grant broader permissions than the two scopes listed above. A Global API Key grants unrestricted access to your entire Cloudflare account — if it is leaked, an attacker can modify DNS, SSL certificates, firewall rules, and account settings. Rotate any token that was used for manual testing if it was ever stored in source-controlled files or shared in a chat log.
+    </Warning>
+  </Step>
+</Steps>
+
+## Required Token Scopes
+
+| Scope | Type | Purpose |
+|---|---|---|
+| Zone > Analytics > Read | Zone | Query WAF and HTTP analytics via the Cloudflare GraphQL API |
+| Account > Account Filter Lists > Edit | Account | Add and remove IPs from the account-level IP list |
+
+## Next Steps
+
+With these three resources in place — the IP list, the WAF custom rule, and the scoped API token — you are ready to configure and start the service. Proceed to the [Quickstart](/quickstart) to run WAF Auto-Block for the first time and confirm that polling and blocking are working correctly.

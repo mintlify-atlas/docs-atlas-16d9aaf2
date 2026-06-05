@@ -1,0 +1,102 @@
+---
+title: "IP Blocking Lifecycle in WAF Auto-Block"
+sidebarTitle: "Blocking Lifecycle"
+description: "From WAF event detection to Cloudflare list entry creation and TTL-based removal — the complete lifecycle of an auto-blocked IP."
+---
+
+Every blocked IP goes through the same lifecycle: detection, threshold check, deduplication, Cloudflare list insertion, local record creation, and eventually TTL-based expiry and cleanup. This page traces each step from the moment a WAF event is detected to the moment the block is lifted, covering the WAF rule path, expiry calculation, the cleanup pass, deduplication behaviour, and the lazy item-ID resolution pattern.
+
+## Block Initiation
+
+The following steps describe how a WAF event becomes a Cloudflare list entry.
+
+<Steps>
+  <Step title="Query Cloudflare WAF analytics">
+    `CloudflareAnalyticsClient.GetOffendingTrafficAsync()` sends a GraphQL request to `firewallEventsAdaptiveGroups` filtered to `action = "block"` for the last `WindowSeconds`. The result is a list of `OffendingTrafficRecord` objects, each containing `ClientIp`, `RuleId`, and `Count`.
+  </Step>
+  <Step title="Resolve the rule">
+    `RuleMatcher.TryResolve()` looks up the record's `RuleId` in the rules dictionary built from configuration. If the rule ID is not present or is disabled, the record is skipped and nothing further happens for that IP.
+  </Step>
+  <Step title="Apply the threshold">
+    If `Count < rule.Threshold`, the IP is skipped. The threshold is per-rule and must be met or exceeded for blocking to proceed.
+  </Step>
+  <Step title="Check for an existing block">
+    `SqliteBlockedIpStore.IsBlockedAsync()` queries the `blocked_ips` table by IP address. If a record already exists — regardless of which rule created it — the IP is skipped and its existing TTL remains in effect.
+  </Step>
+  <Step title="Add the IP to the Cloudflare list">
+    `CloudflareBlocklistClient.AddIpAsync()` posts the IP to the configured account-level list with the comment `auto-blocked: {rule.Name} {blockedAt:O}`. The method returns a `CloudflareBlocklistEntry` containing the assigned list item ID (or an empty string if the response was asynchronous).
+  </Step>
+  <Step title="Persist the local record">
+    `SqliteBlockedIpStore.SaveAsync()` inserts a `BlockedIpRecord` with the following fields: `Ip`, `RuleId`, `CloudflareItemId` (may be empty), `BlockedAtUtc`, `ExpiresAtUtc`, and `HitCount`. The record uses an upsert (`ON CONFLICT DO UPDATE`) so a race-condition write does not leave the table inconsistent.
+  </Step>
+</Steps>
+
+## Expiry Calculation
+
+Block expiry is computed by `BlockingExpirationCalculator.GetExpiresAt()`:
+
+```csharp
+public DateTimeOffset GetExpiresAt(DateTimeOffset blockedAtUtc, int ttlMinutes)
+{
+    var minutes = Math.Max(1, ttlMinutes);
+    return blockedAtUtc.AddMinutes(minutes);
+}
+```
+
+The result is `blockedAt + TtlMinutes`. `Math.Max(1, ttlMinutes)` enforces a floor of 1 minute regardless of the configured value.
+
+TTL is configured independently for each detector type:
+
+- **WAF rules** — `RuleMonitorOptions.TtlMinutes` per rule entry.
+- **Per-IP HTTP code detection** — `HttpStatusCodeRuleOptions.TtlMinutes` per status code rule.
+- **Distributed path detection** — `DistributedPathDetectionOptions.TtlMinutes` shared across all configured status codes in that detector.
+
+## Cleanup Pass
+
+The cleanup pass runs as part of every worker cycle, immediately after the blocking pass.
+
+<Steps>
+  <Step title="Fetch expired records">
+    `SqliteBlockedIpStore.GetExpiredAsync(DateTimeOffset.UtcNow)` queries `blocked_ips` for all rows where `expires_at <= now`, ordered by expiry time ascending. If the result set is empty, the cleanup pass exits immediately.
+  </Step>
+  <Step title="Resolve the Cloudflare item ID">
+    For each expired record, the worker reads `CloudflareItemId` from the stored record. If the value is empty (async-add case), it calls `CloudflareBlocklistClient.ResolveItemIdByIpAsync()`, which performs a paginated `GET` of all list items and finds the entry by IP address.
+  </Step>
+  <Step title="Remove the Cloudflare list entry">
+    `CloudflareBlocklistClient.RemoveIpAsync()` sends a `DELETE` to the Rules Lists API with the resolved item ID. Successful removal logs `Unblocked {Ip} after TTL expiry`.
+  </Step>
+  <Step title="Delete the local record">
+    `SqliteBlockedIpStore.DeleteAsync()` removes the row from `blocked_ips` by IP address.
+  </Step>
+  <Step title="Handle unresolvable item IDs">
+    If `ResolveItemIdByIpAsync()` returns `null`, the record is deferred: neither the Cloudflare list entry nor the SQLite row is touched. The worker logs a `Could not resolve Cloudflare item id` warning and the record will be retried on the next cycle.
+  </Step>
+</Steps>
+
+<Note>
+  The cleanup pass runs as part of the same worker cycle as the blocking pass — not on a separate schedule.
+</Note>
+
+<Warning>
+  If the Cloudflare item ID cannot be resolved during cleanup, the IP remains on the blocklist indefinitely. Check logs for `Could not resolve Cloudflare item id` warnings.
+</Warning>
+
+## Deduplication
+
+Before any block is created, `SqliteBlockedIpStore.IsBlockedAsync()` checks whether the IP already has a row in the `blocked_ips` table. If it does, the IP is skipped unconditionally — it does not matter which rule or detector originally created the record, and it does not matter whether the current trigger is a WAF event, a per-IP HTTP code match, or a distributed path match.
+
+This means:
+
+- An IP blocked by a WAF rule will not be re-blocked by the HTTP status detector in the same or a later cycle.
+- An IP blocked by the per-IP HTTP detector will not be re-blocked by the distributed path detector.
+- The existing record's `ExpiresAt` is unchanged by a skipped re-evaluation.
+
+## Cloudflare Item ID Resolution
+
+When `CloudflareBlocklistClient.AddIpAsync()` receives a successful response but the JSON result does not contain an item ID (for example, when Cloudflare processes the request asynchronously and returns only an operation reference), the service stores an empty string in `cf_item_id` and logs a warning:
+
+```
+Cloudflare accepted the add for {Ip} but did not return an item id yet; cleanup will resolve it later
+```
+
+During the cleanup pass, if `cf_item_id` is empty, `ResolveItemIdByIpAsync()` walks the paginated list of all items in the configured account list, comparing each entry's IP field. Pagination is driven by the `result_info.cursors.after` field until a match is found or the list is exhausted. The resolved ID is used for the `RemoveIpAsync()` call but is not written back to SQLite; the delete that follows renders the update unnecessary.

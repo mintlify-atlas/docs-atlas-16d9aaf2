@@ -1,0 +1,118 @@
+---
+title: "Security Considerations for WAF Auto-Block"
+sidebarTitle: "Security"
+description: "Best practices for securing WAF Auto-Block: API token scoping, secret management, container hardening, and avoiding common credential leakage risks."
+---
+
+WAF Auto-Block handles a live Cloudflare API token capable of modifying your account's IP blocklists. Keeping that token secure is critical to preventing unauthorized blocklist manipulation — a compromised token could be used to block legitimate traffic across every zone on your Cloudflare account, or to silently remove protections that your WAF rules depend on. The guidance on this page covers token scoping, runtime secret management, container hardening, and data-at-rest considerations.
+
+---
+
+## API Token Scoping
+
+WAF Auto-Block requires exactly two Cloudflare permissions. Grant nothing more. The principle of least privilege limits the blast radius if the token is ever compromised — an attacker with a minimal token cannot read zone content, modify DNS, or alter WAF rules themselves.
+
+| Permission | Scope | Why |
+|---|---|---|
+| Zone \> Analytics \> Read | Zone | Query WAF and HTTP analytics via GraphQL |
+| Account \> Account Filter Lists \> Edit | Account | Add and remove IPs from the account-level IP list |
+
+Create the token in the Cloudflare dashboard under **My Profile → API Tokens → Create Token**. Select **Custom token**, add only the two permissions above, and restrict the token to the specific zone and account you are monitoring.
+
+<Warning>
+  Do not use a Global API Key. Do not grant additional permissions. A compromised token with write access to filter lists can block legitimate traffic across your entire account. A Global API Key has unrestricted access to everything in your account and cannot be scoped.
+</Warning>
+
+---
+
+## Secret Storage
+
+The Cloudflare API token must be treated with the same care as a database password or private key. There are several safe ways to supply it to the service at runtime.
+
+**Recommended approaches:**
+
+- **Environment variables** — pass `Cloudflare__ApiToken` directly to the container process via `--env-file` or a secrets manager integration. The value never touches the filesystem inside the image.
+- **Docker secrets** — use Docker Swarm or Compose secrets to mount the token as a file, then read it via environment variable substitution. The secret is not stored in the image layer.
+- **Cloud-native secret stores** — AWS Secrets Manager, Azure Key Vault, HashiCorp Vault, and similar systems can inject secrets at container startup without ever writing them to disk in plaintext.
+
+**What to avoid:**
+
+- Do not write the API token into `appsettings.json` and commit that file to source control — not even to a private repository.
+- Do not bake the token into a `Dockerfile` `ENV` instruction or hardcode it in a `docker-compose.yml` file that is committed.
+- Do not log the token or include it in error reports sent to external systems.
+
+The Docker image build context already excludes `appsettings.Local.json`, `appsettings.*.Local.json`, and `.env` files via `.dockerignore`, so a locally populated credential file will not be accidentally copied into a built image.
+
+<Tip>
+  Rotate any token that was used during testing if it was temporarily stored in a source-controlled file. Even a short-lived commit in a private repository can be recovered from git history.
+</Tip>
+
+---
+
+## Container Security
+
+The service is packaged as a .NET 10 ASP.NET Core application running on the official `mcr.microsoft.com/dotnet/aspnet` base image. That image runs under the `app` user rather than root by default, reducing the surface area available to any process that escapes the application sandbox.
+
+Keep the following in mind when deploying:
+
+- **Outbound network access** — the container only needs outbound HTTPS to `api.cloudflare.com` (port 443). You can enforce this with a network policy or firewall rule that blocks all other outbound destinations.
+- **Inbound network access** — the only inbound port used is `8080`, which serves the status endpoint. No other ports are opened. Map this port only on trusted internal interfaces unless you have an additional authentication layer in front of it.
+- **Volume mounts** — the container needs read/write access to the mounted data volume (default `./data`) for SQLite. No other writable paths are required. Keep the host directory ownable by the container user and avoid mounting sensitive host paths into the container.
+- **Image provenance** — when deploying from Docker Hub, pull a specific versioned tag (for example `proteo5/waf-autoblock:v0.1.0-rc1`) rather than `latest` in production. This ensures you know exactly which build is running and prevents surprise updates.
+
+---
+
+## Status Endpoint Exposure
+
+The service exposes a `GET /status` endpoint on port `8080`. This endpoint returns lightweight operational metadata: a running flag, service startup time, last successful poll timestamp, and last successful cleanup timestamp. It does not return any secrets, API tokens, raw Cloudflare responses, or IP blocklist contents.
+
+Despite the low sensitivity of the data returned, the port should still be treated as an internal operational interface:
+
+- Bind the port to a private or loopback interface when possible.
+- Restrict access to the port using firewall rules, security groups, or a reverse proxy that requires authentication.
+- Do not expose port `8080` on a public-facing address without an additional access control layer.
+
+<Note>
+  The status endpoint is for internal health monitoring. Do not expose it on a public-facing port.
+</Note>
+
+---
+
+## SQLite File Security
+
+The local SQLite database (`./data/state.db` by default) stores the following information for each active block:
+
+- The source IP address that was blocked.
+- The UTC timestamp when the block was created and when it expires.
+- The Cloudflare list item ID returned when the entry was added to the account-level list.
+
+The database does **not** store the Cloudflare API token, zone credentials, or any WAF event payloads. Despite the limited sensitivity, you should still protect the file:
+
+- Restrict read and write access to the mounted data volume to the container user or the service account running the process.
+- Do not include the `data/` directory in backups shared outside the operations team, as the IP addresses and block metadata constitute operational security information.
+- If you ever need to share the database for troubleshooting, be aware that it contains IP addresses and timing data.
+
+---
+
+## Token Rotation
+
+Rotating the Cloudflare API token is a straightforward, zero-downtime operation:
+
+1. In the Cloudflare dashboard, create a new scoped API token with the same two permissions as the original.
+2. Update the `Cloudflare__ApiToken` environment variable (or secret store entry) with the new token value.
+3. Restart the WAF Auto-Block container to pick up the new value:
+
+```bash
+docker restart waf-autoblock
+```
+
+4. Verify the service resumes polling successfully by checking the logs and the `/status` endpoint:
+
+```bash
+docker logs --tail 50 waf-autoblock
+curl -s http://localhost:8080/status
+```
+
+5. Once you have confirmed the new token is working, revoke the old token immediately in the Cloudflare dashboard under **My Profile → API Tokens**.
+
+There is no persistent state in WAF Auto-Block that references the token — only the environment variable is read at startup — so the old token can be revoked as soon as the container is healthy with the new one.

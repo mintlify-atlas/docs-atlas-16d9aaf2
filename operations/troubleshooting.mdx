@@ -1,0 +1,255 @@
+---
+title: "Troubleshoot WAF Auto-Block Issues"
+sidebarTitle: "Troubleshooting"
+description: "Diagnose and resolve common WAF Auto-Block problems including missing credentials, rule ID mismatches, SQLite errors, and Cloudflare API failures."
+---
+
+Most WAF Auto-Block issues fall into a few common categories: configuration errors, Cloudflare API problems, or storage issues. The service is designed to remain running and retry on the next cycle for almost all failure modes rather than crashing, which means problems often surface as log warnings rather than process exits. This page covers diagnosis and resolution for each known failure category.
+
+<Note>
+  When credentials are missing the service still starts successfully — it logs a warning on each cycle but does not crash. Check the logs first before investigating infrastructure or network issues.
+</Note>
+
+## Common Failure Modes
+
+<AccordionGroup>
+  <Accordion title="Polling is skipped on every cycle">
+    **Symptom:** Logs repeatedly show the following warning with no poll activity:
+
+    ```
+    Polling skipped because Cloudflare credentials or detectors are not configured yet.
+    ```
+
+    **Cause:** One or more required Cloudflare credentials are missing or empty, or no detector (WAF rule or HTTP status code rule) is enabled.
+
+    **Fix:** Verify all four Cloudflare configuration values are set and non-empty:
+
+    | Configuration key | Description |
+    |---|---|
+    | `Cloudflare__ApiToken` | Cloudflare API token with `Account Filter Lists: Edit` and `Zone Analytics: Read` permissions |
+    | `Cloudflare__ZoneTag` | The Zone ID for the zone whose WAF analytics are polled |
+    | `Cloudflare__AccountId` | The Cloudflare account ID that owns the IP list |
+    | `Cloudflare__BlocklistId` | The ID of the account-level IP list to write blocked IPs into |
+
+    Also verify that at least one of the following is true:
+    - At least one entry in the `Rules` array has `Enabled = true` and a non-empty `RuleId`.
+    - `HttpStatusDetection.Enabled = true` and at least one entry in `HttpStatusDetection.Codes` has `Enabled = true` with a valid `StatusCode`.
+    - `HttpStatusDetection.Enabled = true`, `HttpStatusDetection.DistributedPathDetection.Enabled = true`, and at least one valid status code is configured under `DistributedPathDetection.StatusCodes`.
+  </Accordion>
+
+  <Accordion title="No IPs are being blocked despite WAF events">
+    **Symptom:** Cloudflare is showing WAF events in the dashboard, but the service reports `0` new blocks in every cycle summary and no `BLOCKED` log entries appear.
+
+    **Cause:** The rule IDs in the `Rules` configuration do not match the actual Cloudflare rule IDs generating the WAF events. Events with unknown `ruleId` values are silently skipped at `Debug` level.
+
+    **Diagnosis:** Enable debug logging for the `WafAutoblock` namespace:
+
+    ```bash
+    Logging__LogLevel__WafAutoblock=Debug
+    ```
+
+    Then look for log lines like:
+
+    ```
+    Skipping {Ip} via {RuleId} because the rule is not explicitly configured or enabled
+    ```
+
+    and:
+
+    ```
+    Candidate event {Ip} via {RuleId} count {Count}
+    ```
+
+    Note the exact `ruleId` values appearing in the candidate events.
+
+    **Fix:** Add those exact rule ID strings to the `Rules` array in your configuration, with `Enabled = true` and a `Threshold` appropriate for your traffic volume:
+
+    ```json
+    {
+      "Rules": [
+        {
+          "RuleId": "<exact-id-from-logs>",
+          "Name": "My WAF Rule",
+          "Enabled": true,
+          "Threshold": 10,
+          "TtlMinutes": 60
+        }
+      ]
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="SQLite initialization error">
+    **Symptom:** The service fails to emit the `SQLite block store initialized at {DatabasePath}` log message, or logs an error during startup referencing the database file path.
+
+    **Cause:** The configured `Storage.DatabasePath` points to a directory that does not exist, is not writable by the service process, or (in Docker) is not backed by a volume mount.
+
+    **Fix:**
+
+    - The service **automatically creates the configured directory** on startup. If you see a creation error, check filesystem permissions on the parent directory.
+    - When running in Docker, ensure the `/app/data` path in the container is backed by a writable bind mount:
+
+    ```bash
+    docker run -d \
+      --name waf-autoblock \
+      -p 8080:8080 \
+      --env-file waf-autoblock.env \
+      -v ${PWD}/data:/app/data \
+      proteo5/waf-autoblock:latest
+    ```
+
+    - Create the host `./data` directory before launching the container if it does not already exist:
+
+    ```bash
+    mkdir -p ./data
+    ```
+  </Accordion>
+
+  <Accordion title="Cloudflare API 429 rate limiting">
+    **Symptom:** Logs show rate-limit warnings during block operations:
+
+    ```
+    Rate-limited while blocking {Ip}; continuing with remaining candidates
+    ```
+
+    **Cause:** Too many requests are being made to the Cloudflare API in a short window, either because `Polling.IntervalSeconds` is very small or because a single cycle is attempting to block a large number of IPs.
+
+    **Fix:**
+
+    - Increase `Polling.IntervalSeconds` to lengthen the time between poll cycles.
+    - Increase `Polling.JitterMilliseconds` to add random delay at the start of each cycle and spread API calls over time.
+    - Raise per-rule `Threshold` values to reduce the number of IPs that qualify for blocking in a single cycle.
+
+    The service does **not** abort the cycle on a 429. It logs the warning and continues processing remaining candidates. The rate-limited IP will be reconsidered on the next cycle when it still meets the threshold.
+  </Accordion>
+
+  <Accordion title="IP not removed after TTL expires">
+    **Symptom:** An IP remains in the Cloudflare blocklist after its configured TTL has elapsed. Logs may show:
+
+    ```
+    Could not resolve Cloudflare item id for {Ip} during cleanup; will retry on the next cycle
+    ```
+
+    **Cause:** The Cloudflare item ID was not recorded in the local SQLite store at block time (typically because the async add response returned before the ID was persisted), or the Cloudflare API call to resolve the item ID failed transiently.
+
+    **Fix:** No immediate action is needed. The cleanup pass automatically retries resolution on every cycle using the Cloudflare API (`ResolveItemIdByIpAsync`). Once the item ID is resolved, the IP is removed from both Cloudflare and SQLite.
+
+    If the IP must be removed immediately, remove it manually via the Cloudflare dashboard under **Account** → **WAF** → **IP Lists**, then delete the corresponding row from the local SQLite database:
+
+    ```bash
+    sqlite3 ./data/state.db "DELETE FROM blocked_ips WHERE ip = '1.2.3.4';"
+    ```
+  </Accordion>
+
+  <Accordion title="HTTP status detection is enabled but no blocks occur">
+    **Symptom:** `HttpStatusDetection.Enabled = true` and status codes are configured, but no HTTP-triggered blocks appear in the logs.
+
+    **Cause:** The configured thresholds (`MinTotalErrors`, `MinDistinctPaths`, `MinCodeRatio`) are set too high for the observed traffic volume, or the `Codes` array is empty or all entries have `Enabled = false`.
+
+    **Diagnosis:** Enable debug logging and look for threshold skip entries:
+
+    ```
+    Skipping {Ip} for HTTP {StatusCode} because thresholds were not met
+    (total {TotalErrors}/{MinTotalErrors}, paths {DistinctPaths}/{MinDistinctPaths}, ratio {CodeRatio}/{MinCodeRatio})
+    ```
+
+    The log values show exactly how far each IP fell short of each threshold.
+
+    **Fix:** Adjust the thresholds carefully. Lowering them increases blocking sensitivity and may produce false positives on clients with legitimate retry behaviour:
+
+    | Threshold | Conservative start | Effect of lowering |
+    |---|---|---|
+    | `MinTotalErrors` | `50` | Blocks IPs with fewer total error requests |
+    | `MinDistinctPaths` | `5` | Blocks IPs hitting fewer unique paths |
+    | `MinCodeRatio` | `0.8` | Blocks IPs where fewer errors are the target code |
+
+    <Warning>
+      Setting `MinTotalErrors` and `MinDistinctPaths` both to `1` with a low `MinCodeRatio` will trigger blocks on nearly any IP that receives a single error response. Test threshold changes in a low-traffic environment first.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="Distributed path detector never fires">
+    **Symptom:** `DistributedPathDetection.Enabled = true` but no distributed-path-triggered blocks appear in the logs.
+
+    **Cause:** Either the parent `HttpStatusDetection.Enabled` flag is `false`, or the `DistributedPathDetection.StatusCodes` list is empty and the deprecated `StatusCode` scalar is also unset, or the path-level thresholds (`MinPathTotalErrors`, `MinDistinctIpsPerPath`) are too high for current traffic.
+
+    **Fix:**
+
+    <Steps>
+      <Step title="Confirm both enabled flags are set">
+        The distributed detector requires **both** its parent and itself to be enabled:
+
+        ```json
+        {
+          "HttpStatusDetection": {
+            "Enabled": true,
+            "DistributedPathDetection": {
+              "Enabled": true,
+              "StatusCodes": [404]
+            }
+          }
+        }
+        ```
+      </Step>
+
+      <Step title="Enable debug logging">
+        Set `Logging__LogLevel__WafAutoblock=Debug` and look for:
+
+        ```
+        Distributed HTTP path detector found no suspicious paths for HTTP {StatusCode}
+        (required total {MinPathTotalErrors}, distinctIps {MinDistinctIpsPerPath})
+        ```
+
+        This confirms the detector is running but the path-level thresholds are not being met.
+      </Step>
+
+      <Step title="Tune path-level thresholds">
+        Lower `MinPathTotalErrors` and `MinDistinctIpsPerPath` to values appropriate for your traffic baseline. The detector identifies paths that are being hit by many IPs, so `MinDistinctIpsPerPath` must match the actual number of distinct clients hitting the same path.
+      </Step>
+    </Steps>
+  </Accordion>
+</AccordionGroup>
+
+## Pre-Soak Reset Procedure
+
+Before running a clean baseline validation — for example, before a long-duration soak test or after a configuration change that invalidated earlier state — reset both local and remote state completely.
+
+<Steps>
+  <Step title="Stop the running service">
+    Docker:
+
+    ```bash
+    docker stop waf-autoblock
+    ```
+
+    Local:
+
+    Press `Ctrl+C` in the terminal running `dotnet run`, or stop the process via your process manager.
+  </Step>
+
+  <Step title="Remove local SQLite state">
+    ```powershell
+    if (Test-Path ./src/WafAutoblock/data/state.db) {
+        Remove-Item -Force ./src/WafAutoblock/data/state.db
+    }
+    ```
+
+    For Docker deployments using a bind mount at `./data`:
+
+    ```bash
+    rm -f ./data/state.db
+    ```
+  </Step>
+
+  <Step title="Clear the Cloudflare IP list">
+    Clear the Cloudflare account list referenced by `Cloudflare.BlocklistId`. You can do this via the Cloudflare dashboard (**Account** → **WAF** → **IP Lists**) or via the Cloudflare API. All entries must be removed so that the next run starts with an empty list and does not conflict with stale item IDs.
+  </Step>
+
+  <Step title="Start the service and verify">
+    Start the service and observe logs from a clean baseline. Confirm:
+
+    - `SQLite block store initialized` appears on startup.
+    - `Polling Cloudflare for the last {WindowSeconds} seconds` appears on the first cycle.
+    - `GET /status` returns `null` for `lastSuccessfulPollAt` until the first cycle completes, then updates.
+  </Step>
+</Steps>

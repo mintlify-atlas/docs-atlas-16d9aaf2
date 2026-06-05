@@ -1,0 +1,121 @@
+---
+title: "WAF Auto-Block Configuration Overview"
+sidebarTitle: "Overview"
+description: "WAF Auto-Block is configured via appsettings.json or environment variables. Environment variables always take precedence and are recommended for Docker deployments."
+---
+
+WAF Auto-Block loads its configuration through the standard .NET configuration pipeline. Values are read from `appsettings.json`, an optional `appsettings.Development.json` (or any environment-specific override file), and environment variables. Each source can override the previous one, so a value set in an environment variable always wins over one defined in any JSON file.
+
+## Configuration Sources
+
+The precedence order from lowest to highest is:
+
+1. `appsettings.json` — baseline defaults committed to the repository
+2. `appsettings.{Environment}.json` — environment-specific overrides (e.g. `appsettings.Production.json`)
+3. `appsettings.Local.json` — local developer overrides, typically git-ignored
+4. Environment variables — highest priority; always override file-based values
+
+For Docker deployments, environment variables are the recommended approach. They avoid mounting config files into containers, integrate cleanly with secrets managers, and make values visible to container orchestrators like Docker Compose or Kubernetes.
+
+<Note>
+  The `ASPNETCORE_ENVIRONMENT` environment variable controls which environment-specific `appsettings.{Environment}.json` file is loaded. When not set, it defaults to `Production`.
+</Note>
+
+## Top-Level Configuration Areas
+
+The full JSON configuration shape across all sections looks like this:
+
+```json
+{
+  "Cloudflare": {
+    "ApiToken": "",
+    "ZoneTag": "",
+    "AccountId": "",
+    "BlocklistId": ""
+  },
+  "Polling": {
+    "IntervalSeconds": 15,
+    "WindowSeconds": 300,
+    "JitterMilliseconds": 2000
+  },
+  "Storage": {
+    "DatabasePath": "./data/state.db"
+  },
+  "Rules": [
+    {
+      "Name": "php_scan",
+      "RuleId": "<cloudflare-rule-id>",
+      "Threshold": 1,
+      "TtlMinutes": 1440,
+      "Enabled": true
+    }
+  ],
+  "HttpStatusDetection": {
+    "Enabled": false,
+    "WindowSeconds": 300,
+    "DistributedPathDetection": { "Enabled": false },
+    "Codes": []
+  }
+}
+```
+
+## Cloudflare Settings
+
+These four credentials are all required. The service calls `IsConfigured()` on startup and refuses to run if any of them is blank.
+
+<ParamField path="Cloudflare.ApiToken" type="string" required>
+  A Cloudflare API token with **Zone:Read**, **Zone WAF:Read**, and **Account Firewall Access Rules:Edit** permissions. Keep this value out of source control — supply it via an environment variable or a secrets manager.
+</ParamField>
+
+<ParamField path="Cloudflare.ZoneTag" type="string" required>
+  The Cloudflare Zone ID for the zone whose WAF analytics the service will query. Found on the zone overview page in the Cloudflare dashboard under **API > Zone ID**.
+</ParamField>
+
+<ParamField path="Cloudflare.AccountId" type="string" required>
+  The Cloudflare Account ID that owns the IP list used for blocking. Found on the account home page in the Cloudflare dashboard.
+</ParamField>
+
+<ParamField path="Cloudflare.BlocklistId" type="string" required>
+  The identifier of the account-level IP list that blocked IPs are written to. Accepts either a UUID or a symbolic name prefixed with `$` (e.g. `$auto_blocked_ips`). When using Docker Compose `.env` files, escape the dollar sign as `$$` to prevent variable substitution.
+</ParamField>
+
+## Polling Settings
+
+These values control how often the service queries Cloudflare WAF analytics and how far back each query looks.
+
+<ParamField path="Polling.IntervalSeconds" type="integer" default="15">
+  How many seconds the service waits between polling cycles. Shorter intervals increase Cloudflare API calls; 15 seconds is a sensible default for most deployments.
+</ParamField>
+
+<ParamField path="Polling.WindowSeconds" type="integer" default="300">
+  The lookback window in seconds applied to each WAF analytics query. A value of `300` means each poll fetches events from the last 5 minutes. Keep this aligned with `HttpStatusDetection.WindowSeconds` unless you have a specific reason to diverge.
+</ParamField>
+
+<ParamField path="Polling.JitterMilliseconds" type="integer" default="2000">
+  Maximum random delay added to each polling cycle before the Cloudflare API call is made. Jitter prevents thundering-herd behaviour in multi-instance or scheduled deployments. A value of `2000` means up to 2 seconds of random additional delay per cycle.
+</ParamField>
+
+## Storage Settings
+
+WAF Auto-Block uses SQLite to persist block state. The database records which IPs have been blocked and when each block expires, enabling TTL-based automatic unblocking across service restarts.
+
+<ParamField path="Storage.DatabasePath" type="string" default="./data/state.db">
+  Path to the SQLite database file. Can be relative (resolved from the working directory) or absolute. The service creates the parent directory automatically on first run if it does not already exist. When running in Docker, mount a volume at the parent directory to persist state across container restarts.
+</ParamField>
+
+## Learn More
+
+<CardGroup cols={2}>
+  <Card title="WAF Rules" icon="shield" href="/configuration/waf-rules">
+    Configure which Cloudflare WAF rule IDs trigger automatic IP blocking and set per-rule thresholds and TTLs.
+  </Card>
+  <Card title="HTTP Status Detection" icon="chart-bar" href="/configuration/http-status-detection">
+    Enable per-IP HTTP error anomaly detection and distributed path scanning for additional coverage.
+  </Card>
+  <Card title="Environment Variables" icon="terminal" href="/configuration/environment-variables">
+    Complete reference of every environment variable accepted by the service for Docker deployments.
+  </Card>
+  <Card title="appsettings.json" icon="file-code" href="/configuration/overview#top-level-configuration-areas">
+    View the full JSON configuration shape with all sections and their defaults.
+  </Card>
+</CardGroup>

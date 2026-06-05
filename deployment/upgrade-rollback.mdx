@@ -1,0 +1,114 @@
+---
+title: "Upgrade and Roll Back WAF Auto-Block"
+sidebarTitle: "Upgrade & Rollback"
+description: "Upgrade WAF Auto-Block to a new Docker image tag and roll back to a previously validated version if issues are found after deployment."
+---
+
+WAF Auto-Block uses versioned Docker image tags to make upgrades and rollbacks predictable. The recommended promotion flow is to validate a versioned tag before switching to `latest`. Rolling back is simply a redeploy to the previously validated tag — no special migration commands are required.
+
+## Upgrade (Compose)
+
+<Steps>
+  <Step title="Set the new tag">
+    Export the target version as `DOCKER_TAG` so Compose uses it on the next pull and up:
+
+    ```bash
+    export DOCKER_TAG=v0.1.0-rc1
+    ```
+  </Step>
+
+  <Step title="Pull the new image">
+    Fetch the new image from Docker Hub before stopping the running container, so the pull does not extend downtime:
+
+    ```bash
+    docker compose -f docker-compose.hub.yml pull
+    ```
+  </Step>
+
+  <Step title="Apply the new image">
+    Bring the service up with the new tag. Compose replaces the running container in place:
+
+    ```bash
+    docker compose -f docker-compose.hub.yml up -d
+    ```
+  </Step>
+
+  <Step title="Check the logs">
+    Tail the recent log output to confirm a clean startup with no exceptions:
+
+    ```bash
+    docker compose -f docker-compose.hub.yml logs --tail 100
+    ```
+  </Step>
+
+  <Step title="Verify the status endpoint">
+    Query `/status` to confirm the service is polling and reporting healthy:
+
+    ```bash
+    curl http://localhost:8080/status
+    ```
+  </Step>
+</Steps>
+
+## Upgrade (docker run)
+
+For installations that use `docker run` directly, stop and remove the existing container, then start a new one with the updated tag. The data volume is untouched by this operation.
+
+```bash
+docker pull proteo5/waf-autoblock:v0.1.0-rc1
+docker rm -f waf-autoblock
+docker run -d \
+  --name waf-autoblock \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  --env-file /opt/waf-autoblock/waf-autoblock.env \
+  -v /opt/waf-autoblock/data:/app/data \
+  proteo5/waf-autoblock:v0.1.0-rc1
+```
+
+Pull the new image before calling `docker rm` to keep the gap between stop and start as short as possible.
+
+## Rollback
+
+Rollback is a redeploy to the last known-good tag. No data changes are needed — the SQLite database on the host volume is shared across all container versions.
+
+**Compose rollback:**
+
+```bash
+cd /opt/waf-autoblock
+export DOCKER_TAG=v0.1.0-rc1
+docker compose -f docker-compose.hub.yml pull
+docker compose -f docker-compose.hub.yml up -d
+```
+
+**docker run rollback:**
+
+```bash
+docker pull proteo5/waf-autoblock:v0.1.0-rc1
+docker rm -f waf-autoblock
+docker run -d \
+  --name waf-autoblock \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  --env-file /opt/waf-autoblock/waf-autoblock.env \
+  -v /opt/waf-autoblock/data:/app/data \
+  proteo5/waf-autoblock:v0.1.0-rc1
+```
+
+<Tip>
+  Keep at least one previously validated image tag available locally so rollback is instant without a re-pull. Run `docker image ls proteo5/waf-autoblock` to see which tags are cached on the server.
+</Tip>
+
+## Validation Checklist
+
+Run through this checklist after every upgrade or rollback before considering the deployment complete:
+
+- `docker ps` shows the `waf-autoblock` container in the `Up` state with the expected image tag.
+- `curl http://localhost:8080/status` returns a JSON response containing `"running": true`.
+- Log output (`docker compose -f docker-compose.hub.yml logs --tail 100`) shows no startup exceptions and at least one completed polling cycle.
+- The SQLite database file is present and being updated under the mounted data volume (for example `/opt/waf-autoblock/data/state.db`).
+- Cloudflare polling resumes correctly — the logs show polling cycle completions and no persistent API errors.
+
+<Note>
+  The SQLite database is mounted from the host and survives container replacements. No migration steps are needed between minor versions.
+</Note>

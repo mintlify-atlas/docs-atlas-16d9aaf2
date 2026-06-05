@@ -1,0 +1,159 @@
+---
+title: "Environment Variable Reference for WAF Auto-Block"
+sidebarTitle: "Environment Variables"
+description: "Complete list of environment variables for configuring WAF Auto-Block in Docker or any environment where file-based config is not preferred."
+---
+
+All configuration values accepted by WAF Auto-Block can be supplied as environment variables. The .NET configuration system maps environment variables to nested JSON properties using the double-underscore (`__`) convention — each `__` represents one level of nesting. For example, `Cloudflare__ApiToken` maps to `Cloudflare.ApiToken` in the JSON shape. Environment variables always take priority over any file-based configuration, making them the recommended approach for Docker deployments, CI pipelines, and secrets managers.
+
+## Complete Variable Reference
+
+| Setting | Environment Variable | Default / Example |
+|---|---|---|
+| Cloudflare API token | `Cloudflare__ApiToken` | (required) |
+| Cloudflare zone tag | `Cloudflare__ZoneTag` | (required) |
+| Cloudflare account ID | `Cloudflare__AccountId` | (required) |
+| Cloudflare blocklist ID or name | `Cloudflare__BlocklistId` | `$$auto_blocked_ips` |
+| Poll interval (seconds) | `Polling__IntervalSeconds` | `15` |
+| Poll window (seconds) | `Polling__WindowSeconds` | `300` |
+| Poll jitter (milliseconds) | `Polling__JitterMilliseconds` | `2000` |
+| SQLite database path | `Storage__DatabasePath` | `./data/state.db` |
+| First rule name | `Rules__0__Name` | `php_scan` |
+| First rule ID | `Rules__0__RuleId` | (required per rule) |
+| First rule threshold | `Rules__0__Threshold` | `1` |
+| First rule TTL (minutes) | `Rules__0__TtlMinutes` | `1440` |
+| First rule enabled | `Rules__0__Enabled` | `true` |
+| HTTP status detection enabled | `HttpStatusDetection__Enabled` | `false` |
+| HTTP status window (seconds) | `HttpStatusDetection__WindowSeconds` | `300` |
+| Distributed path detection enabled | `HttpStatusDetection__DistributedPathDetection__Enabled` | `false` |
+| Distributed status codes (first) | `HttpStatusDetection__DistributedPathDetection__StatusCodes__0` | `404` |
+| Distributed min path errors | `HttpStatusDetection__DistributedPathDetection__MinPathTotalErrors` | `12` |
+| Distributed min distinct IPs | `HttpStatusDetection__DistributedPathDetection__MinDistinctIpsPerPath` | `3` |
+| Distributed min IP hits | `HttpStatusDetection__DistributedPathDetection__MinIpHitsOnSuspiciousPaths` | `2` |
+| Distributed excluded paths (first) | `HttpStatusDetection__DistributedPathDetection__ExcludedPaths__0` | `/` |
+| First code status | `HttpStatusDetection__Codes__0__StatusCode` | `404` |
+| First code enabled | `HttpStatusDetection__Codes__0__Enabled` | `true` |
+| First code min total errors | `HttpStatusDetection__Codes__0__MinTotalErrors` | `20` |
+| First code min distinct paths | `HttpStatusDetection__Codes__0__MinDistinctPaths` | `8` |
+| First code min ratio | `HttpStatusDetection__Codes__0__MinCodeRatio` | `0.7` |
+| First code TTL (minutes) | `HttpStatusDetection__Codes__0__TtlMinutes` | `240` |
+| First code name | `HttpStatusDetection__Codes__0__Name` | `http_404_scan` |
+| Default log level | `Logging__LogLevel__Default` | `Information` |
+| Service log level | `Logging__LogLevel__WafAutoblock` | `Information` |
+
+## Array Index Notation
+
+Configuration arrays such as `Rules` and `HttpStatusDetection.Codes` use zero-based integer indexes in environment variable names. The index is the third segment after the array property name:
+
+```
+Rules__0__Name=php_scan
+Rules__0__RuleId=abc123def456abc123def456abc12301
+Rules__0__Threshold=1
+Rules__0__TtlMinutes=1440
+Rules__0__Enabled=true
+
+Rules__1__Name=geo_block
+Rules__1__RuleId=abc123def456abc123def456abc12302
+Rules__1__Threshold=3
+Rules__1__TtlMinutes=240
+Rules__1__Enabled=true
+```
+
+The same pattern applies to `HttpStatusDetection.Codes` (`HttpStatusDetection__Codes__0__StatusCode`, `HttpStatusDetection__Codes__1__StatusCode`, etc.) and to `HttpStatusDetection.DistributedPathDetection.StatusCodes` (`HttpStatusDetection__DistributedPathDetection__StatusCodes__0`, `HttpStatusDetection__DistributedPathDetection__StatusCodes__1`, etc.).
+
+<Info>
+  The .NET configuration system requires that array indexes be contiguous and zero-based. If you define `Rules__0__Name` and `Rules__2__Name` but omit `Rules__1__Name`, the second entry may not be loaded correctly. Always number entries sequentially starting from `0`.
+</Info>
+
+## Symbolic Blocklist Name
+
+`Cloudflare__BlocklistId` accepts two formats:
+
+- **UUID** — the raw list identifier from the Cloudflare API (e.g. `a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4`)
+- **Symbolic name** — a human-readable name prefixed with a single `$` character (e.g. `$auto_blocked_ips`). The service resolves this to the matching list by name at startup.
+
+When placing the symbolic form in a Docker Compose `.env` file, escape the leading `$` as `$$` so that Docker Compose does not attempt to expand it as a shell variable:
+
+```bash
+# Correct — Docker Compose .env file
+Cloudflare__BlocklistId=$$auto_blocked_ips
+
+# Incorrect — Compose will try to expand $auto_blocked_ips as a variable
+Cloudflare__BlocklistId=$auto_blocked_ips
+```
+
+When passing the value directly as an environment variable in a shell (not through a Compose `.env` file), use a single `$`:
+
+```bash
+export Cloudflare__BlocklistId='$auto_blocked_ips'
+```
+
+## Docker Compose .env File Example
+
+The following `.env` file covers a typical deployment with one WAF rule and HTTP status detection enabled:
+
+```bash
+# Cloudflare credentials
+Cloudflare__ApiToken=your_api_token_here
+Cloudflare__ZoneTag=your_zone_id_here
+Cloudflare__AccountId=your_account_id_here
+Cloudflare__BlocklistId=$$auto_blocked_ips
+
+# Polling
+Polling__IntervalSeconds=15
+Polling__WindowSeconds=300
+Polling__JitterMilliseconds=2000
+
+# Storage
+Storage__DatabasePath=./data/state.db
+
+# WAF rule monitoring
+Rules__0__Name=php_scan
+Rules__0__RuleId=your_cloudflare_rule_id_here
+Rules__0__Threshold=1
+Rules__0__TtlMinutes=1440
+Rules__0__Enabled=true
+
+# HTTP status detection
+HttpStatusDetection__Enabled=true
+HttpStatusDetection__WindowSeconds=300
+
+HttpStatusDetection__Codes__0__StatusCode=404
+HttpStatusDetection__Codes__0__Enabled=true
+HttpStatusDetection__Codes__0__MinTotalErrors=20
+HttpStatusDetection__Codes__0__MinDistinctPaths=8
+HttpStatusDetection__Codes__0__MinCodeRatio=0.7
+HttpStatusDetection__Codes__0__TtlMinutes=240
+HttpStatusDetection__Codes__0__Name=http_404_scan
+
+HttpStatusDetection__Codes__1__StatusCode=400
+HttpStatusDetection__Codes__1__Enabled=true
+HttpStatusDetection__Codes__1__MinTotalErrors=15
+HttpStatusDetection__Codes__1__MinDistinctPaths=6
+HttpStatusDetection__Codes__1__MinCodeRatio=0.6
+HttpStatusDetection__Codes__1__TtlMinutes=120
+HttpStatusDetection__Codes__1__Name=http_400_abuse
+
+# Distributed path detection
+HttpStatusDetection__DistributedPathDetection__Enabled=true
+HttpStatusDetection__DistributedPathDetection__StatusCodes__0=404
+HttpStatusDetection__DistributedPathDetection__StatusCodes__1=400
+HttpStatusDetection__DistributedPathDetection__StatusCodes__2=500
+HttpStatusDetection__DistributedPathDetection__StatusCodes__3=403
+HttpStatusDetection__DistributedPathDetection__MinPathTotalErrors=12
+HttpStatusDetection__DistributedPathDetection__MinDistinctIpsPerPath=3
+HttpStatusDetection__DistributedPathDetection__MinIpHitsOnSuspiciousPaths=2
+HttpStatusDetection__DistributedPathDetection__MinDistinctSuspiciousPathsPerIp=1
+HttpStatusDetection__DistributedPathDetection__TtlMinutes=120
+HttpStatusDetection__DistributedPathDetection__Name=http_status_distributed_scan
+HttpStatusDetection__DistributedPathDetection__ExcludedPaths__0=/
+HttpStatusDetection__DistributedPathDetection__ExcludedPaths__1=/favicon.ico
+
+# Logging
+Logging__LogLevel__Default=Information
+Logging__LogLevel__WafAutoblock=Information
+```
+
+<Note>
+  Do not commit `.env` files containing real API tokens to source control. Add `.env` to your `.gitignore` and use `.env.example` (with blank credential fields) as a safe template for other developers.
+</Note>

@@ -1,0 +1,118 @@
+---
+title: "WAF Auto-Block Status Endpoint Reference"
+sidebarTitle: "Status Endpoint"
+description: "The GET /status endpoint exposes operational state: running flag, startup time, last poll time, and last cleanup time. No secrets are exposed."
+---
+
+WAF Auto-Block exposes two HTTP endpoints for operational visibility. Both are read-only, lightweight, and safe to expose to internal monitoring systems. Neither endpoint returns secrets, API tokens, or raw Cloudflare API payloads.
+
+## Endpoints
+
+### GET /
+
+Returns a minimal service banner that confirms the process is alive and identifies the runtime version.
+
+**Response shape**
+
+```json
+{
+  "service": "waf-autoblock",
+  "status": "running",
+  "runtime": "net10.0"
+}
+```
+
+### GET /status
+
+Returns the current operational state of the background worker, including timing information for the most recent poll and cleanup cycles.
+
+**Response fields**
+
+<ResponseField name="running" type="boolean" required>
+  Always `true` when the service process is up and the HTTP stack is responding. If the service is unhealthy or has crashed, this endpoint will not respond at all.
+</ResponseField>
+
+<ResponseField name="startedAt" type="string (ISO 8601)" required>
+  The UTC timestamp recorded when the service process started. Format: `2024-01-15T10:00:00+00:00`.
+</ResponseField>
+
+<ResponseField name="lastSuccessfulPollAt" type="string | null (ISO 8601)">
+  The UTC timestamp of the most recent Cloudflare analytics poll that completed without error. Returns `null` until the first successful poll cycle finishes after startup.
+</ResponseField>
+
+<ResponseField name="lastCleanupAt" type="string | null (ISO 8601)">
+  The UTC timestamp of the most recent TTL cleanup pass that processed at least one expired entry. Returns `null` until the first cleanup pass that modifies state runs after startup.
+</ResponseField>
+
+**Example response**
+
+```json
+{
+  "running": true,
+  "startedAt": "2024-01-15T10:00:00+00:00",
+  "lastSuccessfulPollAt": "2024-01-15T10:05:15+00:00",
+  "lastCleanupAt": "2024-01-15T10:05:15+00:00"
+}
+```
+
+<Note>
+  `lastSuccessfulPollAt` and `lastCleanupAt` are `null` until the first successful cycle completes after startup.
+</Note>
+
+## Querying the Endpoint
+
+Use any HTTP client to query `/status`. The endpoint accepts `GET` requests and returns `application/json`.
+
+**curl**
+
+```bash
+curl http://localhost:8080/status
+```
+
+**PowerShell**
+
+```powershell
+Invoke-WebRequest -UseBasicParsing http://localhost:8080/status | Select-Object -ExpandProperty Content
+```
+
+## Port Reference
+
+The service listens on different ports depending on how it is started.
+
+| Environment | Default Port | Notes |
+|---|---|---|
+| Docker (container) | `8080` | Configured via the container's `ASPNETCORE_URLS` or Dockerfile `EXPOSE` directive |
+| Local development (`dotnet run`) | `5000` | ASP.NET Core default for non-container execution |
+
+When running via Docker, map the port at launch:
+
+```bash
+docker run -d \
+  --name waf-autoblock \
+  -p 8080:8080 \
+  --env-file waf-autoblock.env \
+  -v ${PWD}/data:/app/data \
+  proteo5/waf-autoblock:latest
+```
+
+## Monitoring Integration
+
+The `/status` endpoint is designed for integration with uptime monitors, load balancer health checks, and alerting pipelines. A `200 OK` response from `/` or `/status` confirms the service process is alive. The `lastSuccessfulPollAt` timestamp lets you verify that the background worker is actively polling, not just that the HTTP server is up.
+
+<Tip>
+  Set `lastSuccessfulPollAt` age as a health threshold. If it hasn't updated in more than 2× `Polling.IntervalSeconds`, polling may be stalled. Configure an alert to fire when `(now − lastSuccessfulPollAt) > 2 × IntervalSeconds` to catch credential failures, network outages, or Cloudflare API errors early.
+</Tip>
+
+A typical health check shell one-liner that exits non-zero if polling is stale by more than five minutes:
+
+```bash
+python3 -c "
+import sys, json, urllib.request, datetime
+r = json.loads(urllib.request.urlopen('http://localhost:8080/status').read())
+last = r.get('lastSuccessfulPollAt')
+if last is None:
+    sys.exit(1)
+age = (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(last)).total_seconds()
+sys.exit(0 if age < 300 else 1)
+"
+```

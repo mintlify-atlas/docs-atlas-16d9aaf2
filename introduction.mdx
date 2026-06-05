@@ -1,0 +1,71 @@
+---
+title: "WAF Auto-Block: Automated Cloudflare IP Blocking"
+sidebarTitle: "Introduction"
+description: "WAF Auto-Block polls Cloudflare WAF analytics and automatically blocks repeat offenders in your account-level IP list with configurable TTL-based expiry."
+---
+
+Cloudflare gives you two powerful primitives: WAF analytics that surface which IPs are triggering your firewall rules, and account-level IP lists that you can reference in WAF custom rules to block traffic. What Cloudflare does not do is connect those two things automatically. There is no built-in mechanism to convert repeated WAF hits into a temporary IP list entry, and Cloudflare list items have no native TTL that causes them to expire and clean up on their own. WAF Auto-Block is a lightweight .NET 10 containerized background service that closes exactly that gap — it watches your Cloudflare WAF analytics, promotes offending IPs into a managed blocklist, and handles the full expiry lifecycle through a locally maintained SQLite store.
+
+## How It Works
+
+On every polling cycle the service executes the following steps:
+
+1. Queries the Cloudflare GraphQL analytics API for WAF events that occurred within a rolling look-back window (default 300 seconds).
+2. Filters those events against the set of Cloudflare rule IDs you have explicitly configured. Events for any rule that is not listed in your configuration are intentionally ignored.
+3. Applies the per-rule hit threshold. An IP must exceed that threshold before it qualifies for blocking.
+4. Adds qualifying IPs to your Cloudflare account-level IP list via the Cloudflare Lists REST API.
+5. Persists a local block record in SQLite containing the Cloudflare list-item ID and the calculated expiration timestamp.
+6. At the end of each cycle, runs a cleanup pass that removes entries whose TTL has elapsed — deleting them from both Cloudflare and SQLite.
+
+The polling interval, look-back window, and per-rule TTL are all configurable. The service runs as a single-zone daemon with no web UI.
+
+## Detection Modes
+
+WAF Auto-Block supports two complementary detection approaches that share the same blocklist and TTL pipeline.
+
+**WAF rule matching** is the primary mode. You supply one or more Cloudflare WAF rule IDs with a hit threshold and a block duration. When a source IP accumulates enough hits against a matched rule within the look-back window, it is blocked.
+
+**HTTP status detection** extends coverage beyond WAF rule hits by analyzing raw HTTP error patterns per source IP:
+
+- *Per-IP anomaly detection* evaluates each IP's total errors for a configured status code, the number of distinct request paths accessed, and the ratio of that status code across all requests from that IP. All three thresholds must be satisfied before a block is issued.
+- *Distributed path detection* looks across all IPs simultaneously. It groups repeated error responses by request path, flags paths that receive errors from an abnormally large number of distinct IPs, and then blocks every IP that participated in a suspicious number of those flagged paths. This mode is especially effective at catching coordinated scanning campaigns that spread load across many addresses.
+
+Loopback and localhost addresses (`127.0.0.1`, `::1`, and the hostname `localhost`) are always excluded from HTTP status auto-blocking, though they remain visible in logs for monitoring purposes.
+
+## Navigation
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run the service locally or in Docker in under 10 minutes and watch the first block happen.
+  </Card>
+  <Card title="Cloudflare Setup" icon="shield-halved" href="/cloudflare-setup">
+    Create the IP list, WAF custom rule, and scoped API token the service needs before it starts.
+  </Card>
+  <Card title="Configuration Overview" icon="sliders" href="/configuration">
+    Full reference for every configuration key, environment variable, and default value.
+  </Card>
+  <Card title="Docker Deployment" icon="docker" href="/deployment">
+    Server installation, upgrade workflow, and rollback procedure using Docker Hub images.
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+The following must be in place before running WAF Auto-Block:
+
+- **.NET 10 SDK** — required only for running the service locally with `dotnet run`. Not needed for Docker-based deployments.
+- **Docker** (and optionally Docker Compose) — required for containerized operation.
+- **A Cloudflare account-level IP list** — the service adds and removes IPs from this list. It must exist before the service starts.
+- **A Cloudflare WAF custom rule** — a rule in your zone that blocks requests when the source IP matches the account-level IP list. This rule must be active before any IPs are added.
+- **A scoped Cloudflare API token** — with the exact minimum permissions shown below.
+
+### Required API Token Scopes
+
+| Scope | Permission Level | Purpose |
+|---|---|---|
+| `Zone > Analytics > Read` | Zone | Read WAF and HTTP analytics via the GraphQL API |
+| `Account > Account Filter Lists > Edit` | Account | Add and remove IPs from the account-level IP list |
+
+<Note>
+  Do not use a Global API Key. Create a scoped token with only the minimum required permissions listed above. A Global API Key grants unrestricted access to your entire Cloudflare account and represents a serious security risk if leaked. Rotate any token that was stored in source-controlled files.
+</Note>

@@ -1,47 +1,165 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with WAF Auto-Block"
+sidebarTitle: "Quickstart"
+description: "Run WAF Auto-Block locally with dotnet run or in Docker in under 10 minutes. Configure Cloudflare credentials and your first WAF rule to start blocking."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+By the end of this guide the WAF Auto-Block service will be running, polling your Cloudflare zone's WAF analytics on a 15-second cycle, and automatically adding offending IPs to your account-level IP list when they exceed your configured rule threshold. You will also have confirmed the service is healthy by checking the `/status` endpoint. Completing these steps takes about 10 minutes assuming your Cloudflare resources are already in place — if they are not, complete [Cloudflare Setup](/cloudflare-setup) first.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+<Tabs>
+  <Tab title="Docker">
+    <Steps>
+      <Step title="Copy the environment file template">
+        From the root of the repository, copy `.env.example` to `waf-autoblock.env`. This file is read by Docker Compose and is excluded from the Docker build context so your credentials are never baked into an image.
 
-## Prerequisites
+        ```bash
+        cp .env.example waf-autoblock.env
+        ```
+      </Step>
 
-Before you begin, you must have:
+      <Step title="Fill in your credentials and first rule">
+        Open `waf-autoblock.env` in your editor and populate the required values. At minimum you need the four Cloudflare credentials and at least one enabled rule.
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
+        ```ini
+        # Cloudflare credentials
+        Cloudflare__ApiToken=your-scoped-api-token
+        Cloudflare__ZoneTag=your-zone-id
+        Cloudflare__AccountId=your-account-id
+        Cloudflare__BlocklistId=$$auto_blocked_ips
 
-## Get started
+        # Polling (defaults are suitable for most deployments)
+        Polling__IntervalSeconds=15
+        Polling__WindowSeconds=300
+        Polling__JitterMilliseconds=2000
 
-<Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+        # Storage
+        Storage__DatabasePath=./data/state.db
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+        # First WAF rule to monitor
+        Rules__0__Name=php_scan
+        Rules__0__RuleId=<cloudflare-rule-id>
+        Rules__0__Threshold=1
+        Rules__0__TtlMinutes=240
+        Rules__0__Enabled=true
+        ```
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+        Replace `your-scoped-api-token`, `your-zone-id`, `your-account-id`, and `<cloudflare-rule-id>` with real values. The `$$auto_blocked_ips` double-dollar prefix is required when using Docker Compose so Compose passes the literal string `$auto_blocked_ips` to the container rather than trying to expand it as a shell variable.
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
-</Steps>
+        <Note>
+          The `Cloudflare__BlocklistId` field accepts either the raw UUID of your account-level IP list or the symbolic name prefixed with `$` (e.g. `$auto_blocked_ips`). The service resolves the symbolic name to the list UUID at startup.
+        </Note>
+      </Step>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+      <Step title="Build and start the container">
+        ```bash
+        docker compose up --build
+        ```
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+        The compose file mounts `./data` into the container so the SQLite database persists across container restarts. On first startup you will see log lines for SQLite store initialization, polling cycle start, and Cloudflare API calls.
+      </Step>
+
+      <Step title="Verify the service is healthy">
+        In a separate terminal, query the status endpoint:
+
+        ```bash
+        curl http://localhost:8080/status
+        ```
+
+        A healthy response looks like:
+
+        ```json
+        {
+          "running": true,
+          "startedAt": "2024-01-15T10:00:00+00:00",
+          "lastSuccessfulPollAt": "2024-01-15T10:00:15+00:00",
+          "lastCleanupAt": "2024-01-15T10:00:15+00:00"
+        }
+        ```
+
+        `lastSuccessfulPollAt` is `null` until the first poll cycle completes. If it stays `null` for more than 30 seconds and credentials are set, check the container logs for API errors.
+      </Step>
+    </Steps>
+
+    <Warning>
+      If any of the four Cloudflare credentials (`ApiToken`, `ZoneTag`, `AccountId`, `BlocklistId`) are missing or empty, the polling cycle is skipped entirely and the service logs a warning explaining which values are absent. The container still starts successfully and the `/status` endpoint remains available — this is by design so misconfigurations are safe to diagnose without crashing the service.
+    </Warning>
+  </Tab>
+
+  <Tab title="Local (.NET)">
+    <Steps>
+      <Step title="Set the environment to Development">
+        Setting `DOTNET_ENVIRONMENT` to `Development` enables the `appsettings.Development.json` configuration overlay that ships with the repository and turns on more verbose logging. This is the recommended mode for local runs.
+
+        ```powershell
+        # PowerShell
+        $env:DOTNET_ENVIRONMENT = "Development"
+        ```
+
+        ```bash
+        # bash / zsh
+        export DOTNET_ENVIRONMENT=Development
+        ```
+
+        <Note>
+          In Development mode, verbose logging is already enabled via `appsettings.Development.json`. You do not need to configure any additional logging settings to observe polling cycles, blocking decisions, and cleanup activity in your terminal.
+        </Note>
+      </Step>
+
+      <Step title="Start the service">
+        From the repository root, run:
+
+        ```bash
+        dotnet run --project src/WafAutoblock/WafAutoblock.csproj
+        ```
+
+        Configuration is loaded in this order, with later sources taking precedence: `appsettings.json` → `appsettings.Development.json` → environment variables. You can supply Cloudflare credentials through environment variables without modifying any file:
+
+        ```bash
+        export Cloudflare__ApiToken=your-scoped-api-token
+        export Cloudflare__ZoneTag=your-zone-id
+        export Cloudflare__AccountId=your-account-id
+        export Cloudflare__BlocklistId='$auto_blocked_ips'
+        dotnet run --project src/WafAutoblock/WafAutoblock.csproj
+        ```
+
+        The service listens on `http://localhost:5000` by default. You will also see a minimal banner at `GET /`.
+      </Step>
+
+      <Step title="Verify the service is healthy">
+        ```bash
+        # bash / zsh
+        curl http://localhost:5000/status
+        ```
+
+        ```powershell
+        # PowerShell
+        Invoke-WebRequest -UseBasicParsing http://localhost:5000/status | Select-Object -ExpandProperty Content
+        ```
+
+        A healthy response looks like:
+
+        ```json
+        {
+          "running": true,
+          "startedAt": "2024-01-15T10:00:00+00:00",
+          "lastSuccessfulPollAt": "2024-01-15T10:00:15+00:00",
+          "lastCleanupAt": "2024-01-15T10:00:15+00:00"
+        }
+        ```
+
+        `lastSuccessfulPollAt` is `null` until the first poll cycle completes successfully. Each field is described below.
+
+        | Field | Description |
+        |---|---|
+        | `running` | Always `true` when the service is up and the endpoint is reachable. |
+        | `startedAt` | ISO 8601 timestamp of when the service process started. |
+        | `lastSuccessfulPollAt` | Timestamp of the most recent poll cycle that completed without error. `null` before the first successful poll. |
+        | `lastCleanupAt` | Timestamp of the most recent cleanup pass that removed at least one expired entry, or the last time the cleanup pass ran without error. `null` before the first cleanup. |
+      </Step>
+    </Steps>
+
+    <Warning>
+      If any of the four Cloudflare credentials (`ApiToken`, `ZoneTag`, `AccountId`, `BlocklistId`) are missing or empty, the polling cycle is skipped entirely and the service logs a warning explaining which values are absent. The service still starts and the `/status` endpoint remains available.
+    </Warning>
+  </Tab>
+</Tabs>
