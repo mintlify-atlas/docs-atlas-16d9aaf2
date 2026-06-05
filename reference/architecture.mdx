@@ -1,5 +1,5 @@
 ---
-title: "WAF Auto-Block Architecture Overview"
+title: "WAF Auto-Block: Service Architecture and Components"
 sidebarTitle: "Architecture"
 description: "WAF Auto-Block is a minimal ASP.NET Core service with a single background worker, Cloudflare API clients, SQLite state store, and a status HTTP endpoint."
 ---
@@ -33,8 +33,8 @@ The service communicates with two distinct Cloudflare API surfaces.
     **Endpoint:** `https://api.cloudflare.com/client/v4/graphql`
 
     Used to query two dataset fields:
-    - `firewallEventsAdaptiveGroups` — WAF block events grouped by source IP and rule ID.
-    - `httpRequestsAdaptiveGroups` — HTTP request aggregates grouped by source IP, request path, and response status code.
+    - `firewallEventsAdaptiveGroups` — WAF block events grouped by source IP and rule ID (`limit: 20`, ordered by count descending).
+    - `httpRequestsAdaptiveGroups` — HTTP request aggregates grouped by source IP, request path, and response status code (`limit: 1000`).
 
     Authentication uses a `Bearer` token set on the `HttpClient` default request headers.
   </Card>
@@ -53,7 +53,7 @@ The following steps describe the complete path from a Cloudflare event to a loca
 
 1. The `Worker` wakes on its configured `IntervalSeconds` schedule (plus a small random jitter up to 750 ms) and begins a cycle.
 2. `CloudflareAnalyticsClient.GetOffendingTrafficAsync()` queries `firewallEventsAdaptiveGroups` for events with `action = "block"` in the last `WindowSeconds`. It returns a list of `OffendingTrafficRecord` objects, each carrying a `ClientIp`, `RuleId`, and `Count`.
-3. `CloudflareAnalyticsClient.GetHttpStatusSignalsAsync()` queries `httpRequestsAdaptiveGroups` for the configured status codes in the same window. It returns a list of `HttpStatusSignalRecord` objects, each carrying a `ClientIp`, `RequestPath`, `StatusCode`, and `Count`.
+3. `CloudflareAnalyticsClient.GetHttpStatusSignalsAsync()` queries `httpRequestsAdaptiveGroups` for the configured status codes over the `HttpStatusDetection.WindowSeconds` period (falling back to `Polling.WindowSeconds` if not set). It returns a list of `HttpStatusSignalRecord` objects, each carrying a `ClientIp`, `RequestPath`, `StatusCode`, and `Count`.
 4. For each WAF event, `RuleMatcher.TryResolve()` maps the `RuleId` to a configured `RuleMonitorOptions`. Unrecognised rule IDs are skipped.
 5. HTTP signal aggregates are scored per IP against `HttpStatusCodeRuleOptions` thresholds (total errors, distinct paths, and per-code ratio) and against the distributed path detection thresholds.
 6. IPs that pass their respective thresholds and are not already in the local store are added via `CloudflareBlocklistClient.AddIpAsync()`. A `BlockedIpRecord` is then saved via `SqliteBlockedIpStore.SaveAsync()`.

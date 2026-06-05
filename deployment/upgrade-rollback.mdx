@@ -1,5 +1,5 @@
 ---
-title: "Upgrade and Roll Back WAF Auto-Block"
+title: "Upgrade and Roll Back WAF Auto-Block Docker Deployments"
 sidebarTitle: "Upgrade & Rollback"
 description: "Upgrade WAF Auto-Block to a new Docker image tag and roll back to a previously validated version if issues are found after deployment."
 ---
@@ -10,9 +10,10 @@ WAF Auto-Block uses versioned Docker image tags to make upgrades and rollbacks p
 
 <Steps>
   <Step title="Set the new tag">
-    Export the target version as `DOCKER_TAG` so Compose uses it on the next pull and up:
+    Change to the working directory and export the target version as `DOCKER_TAG` so Compose uses it on the next pull and up:
 
     ```bash
+    cd /opt/waf-autoblock
     export DOCKER_TAG=v0.1.0-rc1
     ```
   </Step>

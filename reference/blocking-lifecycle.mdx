@@ -1,7 +1,7 @@
 ---
-title: "IP Blocking Lifecycle in WAF Auto-Block"
+title: "WAF Auto-Block: IP Blocking Lifecycle and TTL Expiry"
 sidebarTitle: "Blocking Lifecycle"
-description: "From WAF event detection to Cloudflare list entry creation and TTL-based removal — the complete lifecycle of an auto-blocked IP."
+description: "From WAF event detection to Cloudflare blocklist entry creation and TTL-based removal — the complete lifecycle of an auto-blocked IP."
 ---
 
 Every blocked IP goes through the same lifecycle: detection, threshold check, deduplication, Cloudflare list insertion, local record creation, and eventually TTL-based expiry and cleanup. This page traces each step from the moment a WAF event is detected to the moment the block is lifted, covering the WAF rule path, expiry calculation, the cleanup pass, deduplication behaviour, and the lazy item-ID resolution pattern.

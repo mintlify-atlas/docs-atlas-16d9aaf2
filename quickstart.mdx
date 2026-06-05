@@ -46,7 +46,7 @@ By the end of this guide the WAF Auto-Block service will be running, polling you
         Replace `your-scoped-api-token`, `your-zone-id`, `your-account-id`, and `<cloudflare-rule-id>` with real values. The `$$auto_blocked_ips` double-dollar prefix is required when using Docker Compose so Compose passes the literal string `$auto_blocked_ips` to the container rather than trying to expand it as a shell variable.
 
         <Note>
-          The `Cloudflare__BlocklistId` field accepts either the raw UUID of your account-level IP list or the symbolic name prefixed with `$` (e.g. `$auto_blocked_ips`). The service resolves the symbolic name to the list UUID at startup.
+          The `Cloudflare__BlocklistId` field accepts either the raw UUID of your account-level IP list or the symbolic name prefixed with `$` (e.g. `$auto_blocked_ips`). When a symbolic name is configured, the service looks up the matching list UUID from the Cloudflare API on its first API call and caches the result for subsequent requests.
         </Note>
       </Step>
 

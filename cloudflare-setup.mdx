@@ -21,7 +21,7 @@ WAF Auto-Block depends on three Cloudflare resources that must exist before the 
     After creation, Cloudflare assigns the list a UUID. You can find it in the URL when viewing the list, or via the Cloudflare API. Record this ID — you will use it as the value of `Cloudflare__BlocklistId` in your service configuration.
 
     <Tip>
-      You can pass the blocklist by its symbolic name (e.g. `$auto_blocked_ips`) in the `Cloudflare__BlocklistId` setting instead of its raw UUID. The service resolves the symbolic name to the list UUID at startup. When storing this value in a Docker Compose env file, write it as `$$auto_blocked_ips` (double dollar sign) so Compose does not expand it as a shell variable before passing it to the container.
+      You can pass the blocklist by its symbolic name (e.g. `$auto_blocked_ips`) in the `Cloudflare__BlocklistId` setting instead of its raw UUID. When a symbolic name is configured, the service calls the Cloudflare API to look up the matching list UUID on its first request and caches the result for the lifetime of the process. When storing this value in a Docker Compose env file, write it as `$$auto_blocked_ips` (double dollar sign) so Compose does not expand it as a shell variable before passing it to the container.
     </Tip>
   </Step>
 

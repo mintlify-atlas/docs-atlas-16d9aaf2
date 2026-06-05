@@ -1,7 +1,7 @@
 ---
 title: "WAF Auto-Block Configuration Overview"
 sidebarTitle: "Overview"
-description: "WAF Auto-Block is configured via appsettings.json or environment variables. Environment variables always take precedence and are recommended for Docker deployments."
+description: "Configure WAF Auto-Block via appsettings.json or environment variables. Covers Cloudflare credentials, polling, storage, and detection settings."
 ---
 
 WAF Auto-Block loads its configuration through the standard .NET configuration pipeline. Values are read from `appsettings.json`, an optional `appsettings.Development.json` (or any environment-specific override file), and environment variables. Each source can override the previous one, so a value set in an environment variable always wins over one defined in any JSON file.
@@ -53,7 +53,18 @@ The full JSON configuration shape across all sections looks like this:
   "HttpStatusDetection": {
     "Enabled": false,
     "WindowSeconds": 300,
-    "DistributedPathDetection": { "Enabled": false },
+    "DistributedPathDetection": {
+      "Enabled": false,
+      "StatusCodes": [],
+      "StatusCode": 404,
+      "MinPathTotalErrors": 20,
+      "MinDistinctIpsPerPath": 5,
+      "MinIpHitsOnSuspiciousPaths": 2,
+      "MinDistinctSuspiciousPathsPerIp": 1,
+      "TtlMinutes": 120,
+      "Name": "http_404_distributed_scan",
+      "ExcludedPaths": []
+    },
     "Codes": []
   }
 }
@@ -87,8 +98,8 @@ These values control how often the service queries Cloudflare WAF analytics and 
   How many seconds the service waits between polling cycles. Shorter intervals increase Cloudflare API calls; 15 seconds is a sensible default for most deployments.
 </ParamField>
 
-<ParamField path="Polling.WindowSeconds" type="integer" default="300">
-  The lookback window in seconds applied to each WAF analytics query. A value of `300` means each poll fetches events from the last 5 minutes. Keep this aligned with `HttpStatusDetection.WindowSeconds` unless you have a specific reason to diverge.
+<ParamField path="Polling.WindowSeconds" type="integer" default="20">
+  The lookback window in seconds applied to each WAF analytics query. The C# class default is `20`, but `appsettings.json` sets this to `300` (5 minutes) and it is strongly recommended to set `300` explicitly in your configuration. Keep this aligned with `HttpStatusDetection.WindowSeconds` unless you have a specific reason to diverge.
 </ParamField>
 
 <ParamField path="Polling.JitterMilliseconds" type="integer" default="2000">

@@ -1,7 +1,7 @@
 ---
-title: "Deploy WAF Auto-Block with Docker Compose"
+title: "WAF Auto-Block Docker Compose Server Deployment Guide"
 sidebarTitle: "Docker Compose"
-description: "Use Docker Compose to manage WAF Auto-Block deployments with easy upgrades, rollbacks, and environment file configuration."
+description: "Use Docker Compose to manage WAF Auto-Block on a server — supports versioned image tags, easy upgrades and rollbacks, and custom env file paths."
 ---
 
 Docker Compose is the recommended deployment method for servers. It keeps the container configuration declarative, makes upgrades and rollbacks a single command, and handles the volume mount and restart policy automatically. The repository ships two Compose files: `docker-compose.yml` for building from source and `docker-compose.hub.yml` for pulling the published Docker Hub image.

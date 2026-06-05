@@ -1,5 +1,5 @@
 ---
-title: "WAF Auto-Block Logging Reference"
+title: "WAF Auto-Block Worker Log Messages and Levels Guide"
 sidebarTitle: "Logging"
 description: "WAF Auto-Block logs all polling, blocking, cleanup, and error events. Learn which log messages indicate normal operation versus problems."
 ---
@@ -39,12 +39,6 @@ The entries below reflect the actual log calls in `Worker.cs`. Template placehol
     **Level:** Information
 
     Emitted once at startup before the first poll cycle begins. Confirms that the background service has been scheduled by the host and the SQLite store initialization is about to run.
-  </Accordion>
-
-  <Accordion title="SQLite block store initialized at {DatabasePath}">
-    **Level:** Information
-
-    Emitted after the SQLite database file has been opened (or created) and the schema has been verified. `{DatabasePath}` is the resolved absolute path to the `.db` file. If this message does not appear, the storage layer failed to initialize.
   </Accordion>
 
   <Accordion title="Polling skipped because Cloudflare credentials or detectors are not configured yet.">

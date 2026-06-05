@@ -1,5 +1,5 @@
 ---
-title: "HTTP Status Detection: How It Works"
+title: "HTTP Status Detection Algorithms in WAF Auto-Block"
 sidebarTitle: "HTTP Status Detection"
 description: "Technical deep-dive into WAF Auto-Block's HTTP error anomaly and distributed path detection algorithms, scoring formulas, and loopback exclusion logic."
 ---
@@ -20,7 +20,7 @@ Each result group is mapped to an `HttpStatusSignalRecord` with four fields:
 | `Count` | `count` | Number of requests matching this IP / path / code combination in the window. |
 
 <Note>
-  The `httpRequestsAdaptiveGroups` query uses a `limit: 1000` per request. If your zone generates more than 1000 distinct IP/path/code combinations in the window, some signals may be truncated.
+  The `httpRequestsAdaptiveGroups` query uses `limit: 1000` per request. If your zone generates more than 1000 distinct IP/path/code combinations in the window, some signals may be truncated. By contrast, the WAF event query (`firewallEventsAdaptiveGroups`) uses `limit: 20`, ordered by count descending, so only the top 20 offending IP/rule pairs are returned per cycle.
 </Note>
 
 ## Per-IP Code Detection Algorithm
@@ -80,11 +80,13 @@ An IP is blocked if both conditions are true:
 - `HitsOnSuspiciousPaths >= MinIpHitsOnSuspiciousPaths` (floor 1)
 - `DistinctSuspiciousPaths >= MinDistinctSuspiciousPathsPerIp` (floor 1)
 
-The Cloudflare list comment for a distributed path block uses the pattern `{Name}_{statusCode}` (e.g. `http_status_distributed_scan_404`):
+The Cloudflare list comment for a distributed path block uses the detector name combined with the status code as `{Name}_{statusCode}` (e.g. `http_status_distributed_scan_404`):
 
 ```
-auto-blocked: {detectorName}_{statusCode} {blockedAt:O}
+auto-blocked: {detectorName} {blockedAt:O}
 ```
+
+where `detectorName` is `{Name}_{statusCode}` — the `Name` field from `DistributedPathDetectionOptions` (defaulting to `http_status_distributed`) concatenated with an underscore and the target status code.
 
 ### Path Exclusions
 

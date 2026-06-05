@@ -84,6 +84,10 @@ The logic works in two steps:
   The HTTP status codes to include when grouping signals by path. Accepts multiple codes, e.g. `[404, 400, 500, 403]`. If this list is empty, the service falls back to the legacy single `StatusCode` field for backwards compatibility.
 </ParamField>
 
+<ParamField path="HttpStatusDetection.DistributedPathDetection.StatusCode" type="integer" default="404">
+  Legacy single status code used when `StatusCodes` is empty. Retained for backwards compatibility with older configurations. Prefer `StatusCodes` for new deployments, which supports multiple codes simultaneously.
+</ParamField>
+
 <ParamField path="HttpStatusDetection.DistributedPathDetection.MinPathTotalErrors" type="integer" default="20">
   Minimum total error hits a path must accumulate across all IPs to be considered suspicious. Raise this value on high-traffic zones to reduce noise.
 </ParamField>

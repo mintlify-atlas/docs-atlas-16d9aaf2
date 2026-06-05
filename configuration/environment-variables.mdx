@@ -30,6 +30,9 @@ All configuration values accepted by WAF Auto-Block can be supplied as environme
 | Distributed min path errors | `HttpStatusDetection__DistributedPathDetection__MinPathTotalErrors` | `12` |
 | Distributed min distinct IPs | `HttpStatusDetection__DistributedPathDetection__MinDistinctIpsPerPath` | `3` |
 | Distributed min IP hits | `HttpStatusDetection__DistributedPathDetection__MinIpHitsOnSuspiciousPaths` | `2` |
+| Distributed min distinct suspicious paths | `HttpStatusDetection__DistributedPathDetection__MinDistinctSuspiciousPathsPerIp` | `1` |
+| Distributed TTL (minutes) | `HttpStatusDetection__DistributedPathDetection__TtlMinutes` | `120` |
+| Distributed block name | `HttpStatusDetection__DistributedPathDetection__Name` | `http_404_distributed_scan` |
 | Distributed excluded paths (first) | `HttpStatusDetection__DistributedPathDetection__ExcludedPaths__0` | `/` |
 | First code status | `HttpStatusDetection__Codes__0__StatusCode` | `404` |
 | First code enabled | `HttpStatusDetection__Codes__0__Enabled` | `true` |
@@ -45,7 +48,7 @@ All configuration values accepted by WAF Auto-Block can be supplied as environme
 
 Configuration arrays such as `Rules` and `HttpStatusDetection.Codes` use zero-based integer indexes in environment variable names. The index is the third segment after the array property name:
 
-```
+```bash
 Rules__0__Name=php_scan
 Rules__0__RuleId=abc123def456abc123def456abc12301
 Rules__0__Threshold=1

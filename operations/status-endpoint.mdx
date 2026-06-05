@@ -1,7 +1,7 @@
 ---
-title: "WAF Auto-Block Status Endpoint Reference"
+title: "WAF Auto-Block Operational Endpoints: / and /status"
 sidebarTitle: "Status Endpoint"
-description: "The GET /status endpoint exposes operational state: running flag, startup time, last poll time, and last cleanup time. No secrets are exposed."
+description: "WAF Auto-Block exposes GET / for liveness and GET /status for operational state: running flag, startup time, last poll time, and last cleanup time."
 ---
 
 WAF Auto-Block exposes two HTTP endpoints for operational visibility. Both are read-only, lightweight, and safe to expose to internal monitoring systems. Neither endpoint returns secrets, API tokens, or raw Cloudflare API payloads.
@@ -41,7 +41,7 @@ Returns the current operational state of the background worker, including timing
 </ResponseField>
 
 <ResponseField name="lastCleanupAt" type="string | null (ISO 8601)">
-  The UTC timestamp of the most recent TTL cleanup pass that processed at least one expired entry. Returns `null` until the first cleanup pass that modifies state runs after startup.
+  The UTC timestamp of the most recent TTL cleanup pass that found and processed at least one expired entry (whether removed or deferred). Returns `null` until the first such cleanup pass runs after startup.
 </ResponseField>
 
 **Example response**
@@ -56,7 +56,7 @@ Returns the current operational state of the background worker, including timing
 ```
 
 <Note>
-  `lastSuccessfulPollAt` and `lastCleanupAt` are `null` until the first successful cycle completes after startup.
+  `lastSuccessfulPollAt` is `null` until the first poll cycle completes without error. `lastCleanupAt` is `null` until the first cleanup pass that finds at least one expired entry runs.
 </Note>
 
 ## Querying the Endpoint
